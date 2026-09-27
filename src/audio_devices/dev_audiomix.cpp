@@ -23,9 +23,6 @@ extern cms_t *cms;
 
 extern tandysound_t *tandysound;   // Tandy Emulation object
 
-extern void* tsfrenderer;
-
-extern void dev_mpu_getbuffer(int32_t *buffer, int samples);
 extern void sbdsp_updatebuffer(int16_t* buff,uint32_t samples);
 extern void dev_psg_getbuffer(int32_t* buff,uint8_t samples);
 void cvx_updatebuffer(int16_t* buff,uint32_t samples);
@@ -111,11 +108,9 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
        {
          memset(buffer,0,PM_SAMPLES_PER_BUFFER*PM_SAMPLES_STRIDE);  // Clean the buffer in advanced 2*16bit*PM_SAMPLES_PER_BUFFER
 
-#if USE_MPU
-         if (dev_audiomix.dev_active & AD_MPU) {
-             dev_mpu_getbuffer((int32_t*) buffer, PM_SAMPLES_PER_BUFFER);
-             }  // MPU (Various rendering)
-#endif
+         // MPU: no internal rendering - MIDI is forwarded live to a real external
+         // module over the GPIO12/13 hardware UART (see dev_mpu.cpp), so there is
+         // nothing for the mixer to pull a buffer from.
 
          if (dev_audiomix.dev_active & AD_ADLIB) {
             // Fill int32_t *buffer as int32 for 2x16Bit stereo
