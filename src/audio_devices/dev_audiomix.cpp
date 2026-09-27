@@ -21,7 +21,7 @@
 #include "square/square.h"
 extern cms_t *cms;
 
-extern tandysound_t *tandysound;   // Tandy Emulation object    
+extern tandysound_t *tandysound;   // Tandy Emulation object
 
 extern void* tsfrenderer;
 
@@ -47,6 +47,38 @@ pma_status_t PM_Audio;
 int64_t opl_TotalTime=0;
 uint32_t opl_bufferCount=0;
 int64_t starttime;
+
+// Gentle one-pole (RC-style) low-pass "de-harshening" filter applied to the
+// final mixed output. SBDSP and Covox both resample onto the output rate
+// with simple nearest-sample (zero-order-hold) conversion, which is cheap
+// but leaves harsh, spiky aliasing - a real card's analog output stage would
+// filter that out.
+// A single-pole filter has a gentle -6dB/octave slope, so picking a cutoff
+// above the of game music/SFX (~10kHz) just takes the edge off without muffling
+// the mix.
+#define AUDIO_LPF_CUTOFF_HZ 10000
+
+static int32_t audio_lpf_state_l = 0;
+static int32_t audio_lpf_state_r = 0;
+static int32_t audio_lpf_alpha_q15 = 32768;  // Q15 fixed point, 1.0 = no filtering (set properly in dev_audiomix_start)
+
+static void audio_lpf_init() {
+    double rc = 1.0 / (2.0 * M_PI * (double) AUDIO_LPF_CUTOFF_HZ);
+    double dt = 1.0 / (double) PM_AUDIO_FREQUENCY;
+    double alpha = dt / (rc + dt);
+    audio_lpf_alpha_q15 = (int32_t) (alpha * 32768.0 + 0.5);
+    audio_lpf_state_l = 0;
+    audio_lpf_state_r = 0;
+}
+
+static __force_inline void audio_lpf_apply(int16_t *buff, uint32_t frames) {
+    for (uint32_t i = 0; i < frames; i++) {
+        audio_lpf_state_l += ((buff[i*2]   - audio_lpf_state_l) * audio_lpf_alpha_q15) >> 15;
+        audio_lpf_state_r += ((buff[i*2+1] - audio_lpf_state_r) * audio_lpf_alpha_q15) >> 15;
+        buff[i*2]   = (int16_t) audio_lpf_state_l;
+        buff[i*2+1] = (int16_t) audio_lpf_state_r;
+    }
+}
 
 void oplperf_start()
 {
@@ -77,7 +109,7 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
        buffer = take_empty_buffer();
        if (buffer!=NULL)
        {
-         memset(buffer,0,PM_SAMPLES_PER_BUFFER*PM_SAMPLES_STRIDE);  // Clean the buffer in advanced 2*16bit*PM_SAMPLES_PER_BUFFER 
+         memset(buffer,0,PM_SAMPLES_PER_BUFFER*PM_SAMPLES_STRIDE);  // Clean the buffer in advanced 2*16bit*PM_SAMPLES_PER_BUFFER
 
 #if USE_MPU
          if (dev_audiomix.dev_active & AD_MPU) {
@@ -92,7 +124,7 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
             oplperf_end();
             }  // Adlib
 
-#if USE_SBDSP         
+#if USE_SBDSP
          if (dev_audiomix.dev_active & AD_SBDSP) {
              sbdsp_updatebuffer((int16_t*) buffer,PM_SAMPLES_PER_BUFFER);
             }  // Sound Blaster DSP
@@ -100,11 +132,11 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
 
          if (dev_audiomix.dev_active & AD_CMS) {
              cms->generator(0).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
-             cms->generator(1).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);              
+             cms->generator(1).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
             }  // CMS
 
          if (dev_audiomix.dev_active & AD_TDY) {
-             tandysound->generator().generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);   
+             tandysound->generator().generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
             }  //Tandy (mono)
 
          if (dev_audiomix.dev_active & AD_MMB) {
@@ -121,6 +153,8 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
            }  // Gravis Ultrasound
 #endif
 
+         audio_lpf_apply((int16_t*) buffer, PM_SAMPLES_PER_BUFFER);  // Soften the harsh SBDSP/Covox resampling edge
+
          give_mixed_buffer();
        } else break; // Return directly if no buffer to mix
 
@@ -131,7 +165,7 @@ DBG_OFF_MIX();
 
 void dev_audiomix_start() {
 
-if (!dev_audiomix.enabled)   
+if (!dev_audiomix.enabled)
  {
 /*
 printf("Timer IRQ Priority : %x %x %x %x\n",irq_get_priority(TIMER_IRQ_0),irq_get_priority(TIMER_IRQ_1)
@@ -142,6 +176,7 @@ printf("Timer IRQ Priority : %x %x %x %x\n",irq_get_priority(TIMER_IRQ_0),irq_ge
    dev_audiomix.enabled=pm_audio_init(0);      // Start the PicoMEM Audio output
    dev_audiomix.dev_active=0;                  // No audio device is mixing
    dev_audiomix.mix_inprogress=false;          // No audio mixing in progress
+   audio_lpf_init();                           // (Re)compute the output de-harshening filter for PM_AUDIO_FREQUENCY
 
    PIC_Init();                                 // Audio devices need the PIC
  }
@@ -159,5 +194,5 @@ if (dev_audiomix.enabled)
 
 bool dev_audiomix_isactive()
 {
-   return dev_audiomix.enabled;   
+   return dev_audiomix.enabled;
 }
