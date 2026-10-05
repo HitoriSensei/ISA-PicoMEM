@@ -15,6 +15,9 @@ XT : Mod Master XT, Prince of Persia, Ghostbusters 2, Tongue of the Fatman, 4D S
 #include <stdio.h>
 #include <string.h>
 #include "pico_pic.h"
+#include "hardware/sync.h"
+#include "hardware/timer.h"
+#include "hardware/clocks.h"
 
 bool dma_inprogress=false;
 uint32_t PM_DMA_SendTime;
@@ -154,12 +157,113 @@ static PIC_TimerEvent DSP_DMA_Event = {
 };
 static void sbdsp_adpcm_decode_byte(uint8_t raw);
 
-/*
-static uint32_t DSP_DAC_Timer_EventHandler(Bitu val);
-static PIC_TimerEvent DSP_DAC_Timer_Event = {
-    .handler = DSP_DAC_Timer_EventHandler,
-};
-*/
+// ---------------------------------------------------------------------------
+// Direct DAC (command 0x10)
+// Games write each sample with the CPU, polling the DSP status (no IRQ, no DMA),
+// at their own and possibly irregular rate: there is no sample rate to program.
+// Each write is time stamped by the ISA core and stored in a ring. The mixer replays
+// the samples at their real timing, SBDAC_LATENCY_US behind, with linear interpolation.
+// So any write rate works, and nothing runs (no timer) when Direct DAC is not used.
+// ---------------------------------------------------------------------------
+#define SBDAC_RING_SIZE      1024     // Power of 2 : 23ms of samples written at 44KHz
+#define SBDAC_RING_MASK      (SBDAC_RING_SIZE-1)
+#define SBDAC_LATENCY_US     10000    // Must be > the audio output queue (5 x 64 samples = 7.3ms)
+#define SBDAC_MAX_LAG_US     (SBDAC_LATENCY_US+25000)  // Resync the replay if later than this
+#define SBDAC_INTERP_MAX_US  2000     // No interpolation between samples more distant than this (<500Hz)
+#define SBDAC_STOP_US        200000   // Stop the replay 200ms after the last sample
+
+typedef struct {
+    uint32_t ts[SBDAC_RING_SIZE];     // Write time (time_us_32)
+    uint8_t  val[SBDAC_RING_SIZE];    // 8 bit unsigned sample
+    volatile uint32_t head;           // Only changed by the ISA core
+} sbdac_ring_t;
+
+static sbdac_ring_t sbdac;
+
+static struct {                       // Only used by the mixer (main core)
+    bool     active;
+    uint32_t tail;
+    uint64_t cursor;                  // Replay time, in us << 16
+    uint32_t step;                    // Output sample duration, in us << 16
+    uint32_t prev_ts;                 // Last replayed sample
+    uint8_t  prev_val;
+} sbdac_r;
+
+// ISA core : called for each Direct DAC sample
+static __force_inline void sbdac_write(uint8_t value) {
+    uint32_t h = sbdac.head;
+    sbdac.ts[h & SBDAC_RING_MASK]  = time_us_32();
+    sbdac.val[h & SBDAC_RING_MASK] = value;
+    __dmb();                          // Sample visible before the new head
+    sbdac.head = h + 1;
+}
+
+// Duration of one output sample, from the real I2S rate (same divider computation as audio_i2s.c)
+static uint32_t sbdac_output_step() {
+    uint32_t sys4 = clock_get_hz(clk_sys) * 4;
+    uint32_t divider = sys4 / PM_AUDIO_FREQUENCY;
+    return (uint32_t) (((1000000ull << 16) * divider) / sys4);
+}
+
+// Mixer : add the Direct DAC output to the buffer (stereo interleaved)
+static void sbdac_render(int16_t *buff, uint32_t samples) {
+    uint32_t head = sbdac.head;
+    __dmb();
+    uint32_t now = time_us_32();
+    uint32_t tail = sbdac_r.tail;
+
+    if (!sbdac_r.active) {
+        sbdac_r.active   = true;
+        sbdac_r.step     = sbdac_output_step();
+        sbdac_r.cursor   = (uint64_t) (now - SBDAC_LATENCY_US) << 16;
+        sbdac_r.prev_ts  = now - SBDAC_LATENCY_US;
+        sbdac_r.prev_val = 0x80;
+    }
+    if (head - tail > SBDAC_RING_SIZE) tail = head - SBDAC_RING_SIZE;  // Overrun (mixer was not running)
+
+    // Keep the replay behind the writes : the whole buffer must be in the past
+    int32_t lag = (int32_t) (now - (uint32_t) (sbdac_r.cursor >> 16));
+    int32_t buffer_us = (int32_t) (((uint64_t) samples * sbdac_r.step) >> 16);
+    if (lag < buffer_us || lag > SBDAC_MAX_LAG_US) sbdac_r.cursor = (uint64_t) (now - SBDAC_LATENCY_US) << 16;
+
+    uint64_t cursor  = sbdac_r.cursor;
+    uint32_t prev_ts = sbdac_r.prev_ts;
+    int32_t  prev_v  = sbdac_r.prev_val;
+
+    for (uint32_t sn = 0; sn < samples * 2; sn += 2) {
+        uint32_t t = (uint32_t) (cursor >> 16);
+        while (tail != head) {        // Take all the samples written up to t
+            uint32_t ts = sbdac.ts[tail & SBDAC_RING_MASK];
+            if ((int32_t) (ts - t) > 0) break;
+            prev_ts = ts;
+            prev_v  = sbdac.val[tail & SBDAC_RING_MASK];
+            tail++;
+        }
+        int32_t v = prev_v << 8;      // 8.8 fixed point
+        if (tail != head) {           // Interpolate toward the next sample
+            uint32_t since = t - prev_ts;
+            uint32_t dt = sbdac.ts[tail & SBDAC_RING_MASK] - prev_ts;   // > since
+            if ((int32_t) since >= 0 && dt < SBDAC_INTERP_MAX_US)
+                v += ((int32_t) sbdac.val[tail & SBDAC_RING_MASK] - prev_v) * (int32_t) ((since << 8) / dt);
+        }
+        int16_t res = (int16_t) ((v - (128 << 8)) >> 2);  // Same level as the DMA output : (u-128)*64
+        buff[sn]   += res;
+        buff[sn+1] += res;
+        cursor += sbdac_r.step;
+    }
+
+    sbdac_r.tail     = tail;
+    sbdac_r.cursor   = cursor;
+    sbdac_r.prev_ts  = prev_ts;
+    sbdac_r.prev_val = (uint8_t) prev_v;
+
+    // Nothing written for a while : slowly bring the level back to 0x80 (no click), then stop
+    if (tail == head && (int32_t) ((uint32_t) (cursor >> 16) - prev_ts) > SBDAC_STOP_US) {
+        if (sbdac_r.prev_val > 0x80) sbdac_r.prev_val--;
+        else if (sbdac_r.prev_val < 0x80) sbdac_r.prev_val++;
+        else sbdac_r.active = false;
+    }
+}
 
 static __force_inline void sbdsp_dma_disable() {
     sbdsp.mode=MODE_NONE;
@@ -183,35 +287,6 @@ static __force_inline void sbdsp_dma_enable() {
     } else { PM_INFO("SB> DMA Already Enabled"); }
 }
 
-/*
-static __force_inline bool sbdsp_dac_enable() {
-    if (sbdsp.mode==MODE_NONE)  // Start DAC if only in MODE_NONE
-      {
-        //afifo_reset8(&sbdsp_fifo); // Reset the FIFO
-        //Set the sb dsp output rate to 31KHz
-        sbdsp.dac_interval = 32;    //Simulate a DAC at 31250 Hz max
-        sbdsp.sample_step  = (31250 * 65536ul) / PM_AUDIO_FREQUENCY; // Step for the Audio rate convertion
-        sbdsp.increment    = 0;
-        sbdsp.readsample   = true;
-        sbdsp.prev_sample8u = 0x80;
-
-        PIC_AddEvent(&DSP_DAC_Timer_Event, sbdsp.dac_interval, 0);
-        sbdsp.mode=MODE_DAC;
-        return true;
-      }
-
-    PM_INFO("SB> Cant start DAC");
-    return false;
-}
-
-static __force_inline void sbdsp_dac_disable() {
-    if (sbdsp.mode==MODE_DAC)
-      {
-        sbdsp.dac_interval=0;    //Stop the DAC timer if running
-        PIC_RemoveEvent(&DSP_DAC_Timer_Event);
-      }
-}
-*/
 
 static uint32_t __not_in_flash_func(DSP_DMA_EventHandler)(Bitu val) {
     uint32_t current_interval;
@@ -284,14 +359,6 @@ static void __not_in_flash_func(sbdsp_dma_isr)(void) {
       sbdsp.dma_rx_index=0;
       if (++sbdsp.dma_rx_index!=1) isa_dma_start_write();
       else dma_inprogress=false;
-}
-
-static uint32_t __not_in_flash_func(DSP_DAC_EventHandler)(Bitu val) {
-  if (sbdsp.mode==MODE_DAC)
-     {
-       afifo_add_sample8(&sbdsp_fifo, sbdsp.cur_sample8);
-     }
-  return sbdsp.dac_interval;
 }
 
 // Send an IRQ after some time, for "Tinny" DMA transfer simulation
@@ -658,6 +725,7 @@ void sbdsp_process(void) {
             if(sbdsp.dav_dsp) {
                 if(sbdsp.current_command_index==1) {
                     sbdsp.cur_sample8=sbdsp.inbox;
+                    sbdac_write(sbdsp.inbox);
                     sbdsp.dav_dsp=0;
                     sbdsp.current_command=0;
                 }
@@ -1110,6 +1178,9 @@ void sbdsp_updatebuffer(int16_t* buff,uint32_t samples)
 */
 
 //  PM_INFO("SB_GetBuffer\n");
+  // Direct DAC : only a compare when it is not used
+  if (sbdac_r.active || sbdac.head != sbdac_r.tail) sbdac_render(buff, samples);
+
  if (sbdsp.dma_stereo)
   {
   }
