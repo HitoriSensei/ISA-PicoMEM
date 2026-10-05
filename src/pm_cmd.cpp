@@ -155,6 +155,9 @@ void dev_audiomix_resume() {}
 #if USE_NE2000
 extern "C" {
 #include "ne2000/dev_ne2000.h"
+#if PM_HTTP
+#include "httpd/pm_httpd.h"
+#endif
 extern wifi_infos_t PM_Wifi;
 }
 #endif
@@ -2084,7 +2087,12 @@ if (WifiRes!=0)
     PM_Config->ne2000Port=0;
     PM_ERROR("\nWifi Init Err : %d\n",WifiRes);
    }
-   else BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+   else {
+    BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+#if PM_HTTP
+    pm_httpd_init();       // Start the HTTP server if http.txt is on the SD card
+#endif
+   }
 
 #endif //
 #endif // 
@@ -2210,6 +2218,10 @@ if (USB_Host_Enabled)
 
 #if !BOARD_WM10
 if (dev_audiomix.enabled) pm_audio_domix();
+#endif
+
+#if PM_HTTP
+if (BV_WifiInit==INIT_DONE) pm_httpd_task();  // HTTP server network polling and transfers
 #endif
 
 absolute_time_t pm_delay_delta=absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay);

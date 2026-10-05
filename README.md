@@ -243,6 +243,21 @@ The PicoMEM can emulate a ne2000 network card via Wifi.<br />
 - Use ne2000.com 8Bit (command line : ne2000 0x60 0x3 0x300) or pm2000 (command line : pm2000 0x60)<br />
 - The Wifi Access point need to be relatively close to increase the chance of connection success. The IRQ Can be changed in the BIOS Menu (Default is IRQ 3)<br />
 
+## SD card access via Wifi (HTTP)
+
+When the Wifi is connected, the PicoMEM can serve the SD card to a web browser : browse, download, upload, delete files and create folders.<br />
+The Wifi chip is shared with the ne2000 emulation, so the server uses its own **static IP address** (choose a free one on your network, different from the IP used by the PC).<br />
+
+**How to use it :**
+- Create a http.txt file at the root of the SD card, one value per line (empty lines and lines starting with # are ignored) :
+  1. IP address (ex: 192.168.1.50)
+  2. Network mask (ex: 255.255.255.0)
+  3. Gateway (ex: 192.168.1.1)
+  4. Password (optional)
+- Open `http://192.168.1.50/` in a browser. Command line : `curl -T file.zip "http://192.168.1.50/f?p=/file.zip"` (upload) and `curl -o file.zip "http://192.168.1.50/f?p=/file.zip"` (download). Add `&k=PASSWORD` if a password is set.
+- Without http.txt nothing is started and the SD card is never touched by the server. Without a password anybody on the network can modify the SD card (no encryption).
+- Files are read/written by the PicoMEM main loop, so a transfer may briefly disturb the audio. Don't write to disk image files used by the emulated hard disk while the PC is running.
+
 ## Tested machines :
 - IBM 5150, 5160, 5170
 - IBM PS/1, IBM PS/2 30 286, PS2 8535 (Warning : As its HDD use DMA, does not boot if emulated RAM is added)
