@@ -49,10 +49,10 @@ uint32_t opl_bufferCount=0;
 int64_t starttime;
 
 // Gentle one-pole (RC-style) low-pass "de-harshening" filter applied to the
-// final mixed output. SBDSP and Covox both resample onto the output rate
-// with simple nearest-sample (zero-order-hold) conversion, which is cheap
-// but leaves harsh, spiky aliasing - a real card's analog output stage would
-// filter that out.
+// Covox output only. Covox resamples onto the output rate with simple
+// nearest-sample (zero-order-hold) conversion, which is cheap but leaves harsh,
+// spiky aliasing. (The SB DSP has its own SB16 style band-limited resampling,
+// and like on a real SB16 the other sources, OPL included, are not filtered.)
 // A single-pole filter has a gentle -6dB/octave slope, so picking a cutoff
 // above the of game music/SFX (~10kHz) just takes the edge off without muffling
 // the mix.
@@ -144,7 +144,11 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
             }  //mindscape music board (Stereo)
 
          if (dev_audiomix.dev_active & AD_CVX) {
-             cvx_updatebuffer((int16_t*) buffer,PM_SAMPLES_PER_BUFFER);
+             int16_t cvx_buffer[PM_SAMPLES_PER_BUFFER*2];
+             memset(cvx_buffer,0,sizeof(cvx_buffer));
+             cvx_updatebuffer(cvx_buffer,PM_SAMPLES_PER_BUFFER);
+             audio_lpf_apply(cvx_buffer, PM_SAMPLES_PER_BUFFER);   // Soften the harsh Covox resampling edge
+             for (int n=0;n<PM_SAMPLES_PER_BUFFER*2;n++) ((int16_t*) buffer)[n] += cvx_buffer[n];
             }  // Covox (mono)
 
 #if USE_GUS
@@ -152,8 +156,6 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
             gus_updatebuffer((int16_t*) buffer,PM_SAMPLES_PER_BUFFER);
            }  // Gravis Ultrasound
 #endif
-
-         audio_lpf_apply((int16_t*) buffer, PM_SAMPLES_PER_BUFFER);  // Soften the harsh SBDSP/Covox resampling edge
 
          give_mixed_buffer();
        } else break; // Return directly if no buffer to mix

@@ -14,6 +14,7 @@ XT : Mod Master XT, Prince of Persia, Ghostbusters 2, Tongue of the Fatman, 4D S
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "pico_pic.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
@@ -385,6 +386,100 @@ static PIC_TimerEvent DSP_DAC_Resume_event = {
 };
 
 
+// ---------------------------------------------------------------------------
+// SB16 style "brickwall" output filter
+// The SB16 band-limits its PCM output just below half the sample rate, and the cutoff
+// moves with the rate (11KHz : nothing above 5.5KHz, 22KHz : nothing above 11KHz).
+// See https://www.vogons.org/viewtopic.php?t=49802
+// Emulated like the DOSBox Staging "sb16" filter : band-limited (windowed sinc)
+// resampling from the DSP rate to the output rate, instead of repeating samples.
+// The kernel is defined in input samples, so the same table gives a cutoff at
+// SBF_CUTOFF x the DSP rate for every rate : no recomputation when the rate changes.
+// ---------------------------------------------------------------------------
+#define SBF_TAPS    48        // Kernel length, in input samples (adds SBF_TAPS/2 samples of latency)
+#define SBF_PHASES_BITS 7                // 128 sub-sample positions of the output (nearest one is used)
+#define SBF_PHASES  (1 << SBF_PHASES_BITS)
+#define SBF_CUTOFF  0.46f     // -6dB point, fraction of the DSP sample rate (0.5 = Nyquist)
+#define SBF_BETA    7.0f      // Kaiser window : ~70dB rejection above the cutoff
+
+static int16_t  sbf_kernel[SBF_PHASES][SBF_TAPS]; // Q15, each phase sums to 1.0
+static int16_t  sbf_hist[SBF_TAPS*2];             // Last input samples, stored twice : no wrap in the filter loop
+static uint32_t sbf_w;                            // Next write index (0..SBF_TAPS-1)
+static uint32_t sbf_pos;                          // Output position between two input samples (Q24)
+static uint32_t sbf_quiet;                        // Nb of silent input samples in a row
+
+static float sbf_bessel_i0(float x) {
+    float sum = 1.0f, term = 1.0f;
+    for (int k = 1; k < 25; k++) {
+        float f = x / (2.0f * k);
+        term *= f * f;
+        sum += term;
+    }
+    return sum;
+}
+
+static void sbf_init() {
+    const float half = SBF_TAPS / 2.0f;
+    const float i0_beta = sbf_bessel_i0(SBF_BETA);
+    float c[SBF_TAPS];
+
+    for (int p = 0; p < SBF_PHASES; p++) {
+        float frac = (float) p / SBF_PHASES;
+        float sum = 0.0f;
+        for (int k = 0; k < SBF_TAPS; k++) {
+            float d = (float) (k - (SBF_TAPS/2 - 1)) - frac;   // Distance to the output point, in input samples
+            float x = 2.0f * SBF_CUTOFF * d;
+            float sinc = (x == 0.0f) ? 1.0f : sinf((float) M_PI * x) / ((float) M_PI * x);
+            float r = d / half;
+            float win = (r * r < 1.0f) ? sbf_bessel_i0(SBF_BETA * sqrtf(1.0f - r * r)) / i0_beta : 0.0f;
+            c[k] = sinc * win;
+            sum += c[k];
+        }
+        for (int k = 0; k < SBF_TAPS; k++) sbf_kernel[p][k] = (int16_t) lrintf(c[k] / sum * 32767.0f);
+    }
+    memset(sbf_hist, 0, sizeof(sbf_hist));
+    sbf_w = 0;
+    sbf_pos = 0;
+    sbf_quiet = SBF_TAPS + 1;
+}
+
+static __force_inline void sbf_push(int16_t sample) {
+    sbf_hist[sbf_w] = sample;
+    sbf_hist[sbf_w + SBF_TAPS] = sample;
+    if (++sbf_w == SBF_TAPS) sbf_w = 0;
+    if (sample) sbf_quiet = 0;
+    else if (sbf_quiet <= SBF_TAPS) sbf_quiet++;
+}
+
+// Read the DSP FIFO (8 bit mono) at the DSP rate, add the filtered samples at the output rate
+static void __not_in_flash_func(sbf_render)(int16_t *buff, uint32_t samples) {
+    uint32_t rate = sbdsp.sample_rate ? sbdsp.sample_rate : 22050;
+    if (rate > 48000) rate = 48000;
+    const uint32_t step = (uint32_t) (((uint64_t) rate << 24) / PM_AUDIO_FREQUENCY);   // Input samples per output sample (Q24)
+
+    for (uint32_t sn = 0; sn < samples * 2; sn += 2) {
+        sbf_pos += step;
+        while (sbf_pos >= (1u << 24)) {
+            sbf_pos -= (1u << 24);
+            int8_t raw;
+            if (afifo_take_sample8(&sbdsp_fifo, &raw)) sbf_push((int16_t) (((uint8_t) raw - 128) * 64));  // Same level as before
+            else if (sbf_quiet > SBF_TAPS) return;   // Nothing to play and the filter is empty : no CPU used
+            else sbf_push(0);                        // FIFO empty : let the filter output fade out
+        }
+
+        const int16_t *h = sbf_kernel[sbf_pos >> (24 - SBF_PHASES_BITS)];
+        const int16_t *x = &sbf_hist[sbf_w];        // Oldest to newest sample
+        int32_t acc = 0;
+        for (int k = 0; k < SBF_TAPS; k++) acc += h[k] * x[k];
+        acc >>= 15;
+        if (acc > 32767) acc = 32767;
+        else if (acc < -32768) acc = -32768;
+
+        buff[sn]   += (int16_t) acc;
+        buff[sn+1] += (int16_t) acc;
+    }
+}
+
 void sbdsp_init()
 {
 
@@ -410,6 +505,7 @@ void sbdsp_init()
 
 
     afifo_init8(&sbdsp_fifo); // initialize the audio FIFO
+    sbf_init();               // SB16 style output filter
 
 #ifdef BOARD_PICOMEM
     PM_INFO("sbdsp_init\n");
@@ -1166,44 +1262,11 @@ if (sbdsp.mainloop_action==DSP_MLC_SENDIRQ) {  // Perform the reset here, to not
 // return an audio buffer by reading from the audio fifo
 void sbdsp_updatebuffer(int16_t* buff,uint32_t samples)
 {
-  int8_t   res8u;
-  uint16_t prev_increment;
-  int16_t  fres;
-  res8u=sbdsp.prev_sample8u;
-  /*
- if (sbdsp.mainloop_action==DSP_MLC_SET_TIME_CST)
-    {
-
-    }
-*/
-
-//  PM_INFO("SB_GetBuffer\n");
   // Direct DAC : only a compare when it is not used
   if (sbdac_r.active || sbdac.head != sbdac_r.tail) sbdac_render(buff, samples);
 
- if (sbdsp.dma_stereo)
-  {
-  }
-    else
-  {
-    for (uint32_t sn=0;sn<samples*2;sn+=2)  // Stereo, so 2x more data than "samples"
-      {
-       // 8Bit Not signed
-        if (sbdsp.readsample)
-             if (!afifo_take_sample8(&sbdsp_fifo, &res8u))
-              {
-                 sbdsp.prev_sample8u=0x80;  // If the FIFO is empty, return silence
-                return;
-              }
-        fres=(int16_t) ((res8u<<8)+0x8000)/4;  // Convert to 16Bit signed
-        prev_increment=sbdsp.increment;
-        sbdsp.increment+=sbdsp.sample_step;    // Adjust the DMA buffer to the Output frequency
-        sbdsp.readsample = (sbdsp.increment<=prev_increment) ? true : false;
-
-        buff[sn]   += fres;
-        buff[sn+1] += fres;
-      }
-    sbdsp.prev_sample8u=res8u;  // Save the last Sample for the next time
+  if (sbdsp.dma_stereo)
+   {
    }
-
+    else sbf_render(buff, samples);   // 8 bit mono, band-limited to the DSP rate (SB16 like)
 }
