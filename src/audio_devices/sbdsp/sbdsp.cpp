@@ -14,11 +14,9 @@ XT : Mod Master XT, Prince of Persia, Ghostbusters 2, Tongue of the Fatman, 4D S
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 #include "pico_pic.h"
-#include "hardware/sync.h"
-#include "hardware/timer.h"
-#include "hardware/clocks.h"
+#include "bandlimit/bl_filter.h"
+#include "bandlimit/ts_dac.h"
 
 bool dma_inprogress=false;
 uint32_t PM_DMA_SendTime;
@@ -158,113 +156,12 @@ static PIC_TimerEvent DSP_DMA_Event = {
 };
 static void sbdsp_adpcm_decode_byte(uint8_t raw);
 
-// ---------------------------------------------------------------------------
-// Direct DAC (command 0x10)
-// Games write each sample with the CPU, polling the DSP status (no IRQ, no DMA),
-// at their own and possibly irregular rate: there is no sample rate to program.
-// Each write is time stamped by the ISA core and stored in a ring. The mixer replays
-// the samples at their real timing, SBDAC_LATENCY_US behind, with linear interpolation.
-// So any write rate works, and nothing runs (no timer) when Direct DAC is not used.
-// ---------------------------------------------------------------------------
-#define SBDAC_RING_SIZE      1024     // Power of 2 : 23ms of samples written at 44KHz
-#define SBDAC_RING_MASK      (SBDAC_RING_SIZE-1)
-#define SBDAC_LATENCY_US     10000    // Must be > the audio output queue (5 x 64 samples = 7.3ms)
-#define SBDAC_MAX_LAG_US     (SBDAC_LATENCY_US+25000)  // Resync the replay if later than this
-#define SBDAC_INTERP_MAX_US  2000     // No interpolation between samples more distant than this (<500Hz)
-#define SBDAC_STOP_US        200000   // Stop the replay 200ms after the last sample
+// Direct DAC (command 0x10) : games write each sample with the CPU, polling the DSP status
+// (no IRQ, no DMA), at their own rate. Time stamped and band-limited to the measured rate (ts_dac.h)
+static ts_dac_t sbdsp_dac;
 
-typedef struct {
-    uint32_t ts[SBDAC_RING_SIZE];     // Write time (time_us_32)
-    uint8_t  val[SBDAC_RING_SIZE];    // 8 bit unsigned sample
-    volatile uint32_t head;           // Only changed by the ISA core
-} sbdac_ring_t;
-
-static sbdac_ring_t sbdac;
-
-static struct {                       // Only used by the mixer (main core)
-    bool     active;
-    uint32_t tail;
-    uint64_t cursor;                  // Replay time, in us << 16
-    uint32_t step;                    // Output sample duration, in us << 16
-    uint32_t prev_ts;                 // Last replayed sample
-    uint8_t  prev_val;
-} sbdac_r;
-
-// ISA core : called for each Direct DAC sample
-static __force_inline void sbdac_write(uint8_t value) {
-    uint32_t h = sbdac.head;
-    sbdac.ts[h & SBDAC_RING_MASK]  = time_us_32();
-    sbdac.val[h & SBDAC_RING_MASK] = value;
-    __dmb();                          // Sample visible before the new head
-    sbdac.head = h + 1;
-}
-
-// Duration of one output sample, from the real I2S rate (same divider computation as audio_i2s.c)
-static uint32_t sbdac_output_step() {
-    uint32_t sys4 = clock_get_hz(clk_sys) * 4;
-    uint32_t divider = sys4 / PM_AUDIO_FREQUENCY;
-    return (uint32_t) (((1000000ull << 16) * divider) / sys4);
-}
-
-// Mixer : add the Direct DAC output to the buffer (stereo interleaved)
-static void sbdac_render(int16_t *buff, uint32_t samples) {
-    uint32_t head = sbdac.head;
-    __dmb();
-    uint32_t now = time_us_32();
-    uint32_t tail = sbdac_r.tail;
-
-    if (!sbdac_r.active) {
-        sbdac_r.active   = true;
-        sbdac_r.step     = sbdac_output_step();
-        sbdac_r.cursor   = (uint64_t) (now - SBDAC_LATENCY_US) << 16;
-        sbdac_r.prev_ts  = now - SBDAC_LATENCY_US;
-        sbdac_r.prev_val = 0x80;
-    }
-    if (head - tail > SBDAC_RING_SIZE) tail = head - SBDAC_RING_SIZE;  // Overrun (mixer was not running)
-
-    // Keep the replay behind the writes : the whole buffer must be in the past
-    int32_t lag = (int32_t) (now - (uint32_t) (sbdac_r.cursor >> 16));
-    int32_t buffer_us = (int32_t) (((uint64_t) samples * sbdac_r.step) >> 16);
-    if (lag < buffer_us || lag > SBDAC_MAX_LAG_US) sbdac_r.cursor = (uint64_t) (now - SBDAC_LATENCY_US) << 16;
-
-    uint64_t cursor  = sbdac_r.cursor;
-    uint32_t prev_ts = sbdac_r.prev_ts;
-    int32_t  prev_v  = sbdac_r.prev_val;
-
-    for (uint32_t sn = 0; sn < samples * 2; sn += 2) {
-        uint32_t t = (uint32_t) (cursor >> 16);
-        while (tail != head) {        // Take all the samples written up to t
-            uint32_t ts = sbdac.ts[tail & SBDAC_RING_MASK];
-            if ((int32_t) (ts - t) > 0) break;
-            prev_ts = ts;
-            prev_v  = sbdac.val[tail & SBDAC_RING_MASK];
-            tail++;
-        }
-        int32_t v = prev_v << 8;      // 8.8 fixed point
-        if (tail != head) {           // Interpolate toward the next sample
-            uint32_t since = t - prev_ts;
-            uint32_t dt = sbdac.ts[tail & SBDAC_RING_MASK] - prev_ts;   // > since
-            if ((int32_t) since >= 0 && dt < SBDAC_INTERP_MAX_US)
-                v += ((int32_t) sbdac.val[tail & SBDAC_RING_MASK] - prev_v) * (int32_t) ((since << 8) / dt);
-        }
-        int16_t res = (int16_t) ((v - (128 << 8)) >> 2);  // Same level as the DMA output : (u-128)*64
-        buff[sn]   += res;
-        buff[sn+1] += res;
-        cursor += sbdac_r.step;
-    }
-
-    sbdac_r.tail     = tail;
-    sbdac_r.cursor   = cursor;
-    sbdac_r.prev_ts  = prev_ts;
-    sbdac_r.prev_val = (uint8_t) prev_v;
-
-    // Nothing written for a while : slowly bring the level back to 0x80 (no click), then stop
-    if (tail == head && (int32_t) ((uint32_t) (cursor >> 16) - prev_ts) > SBDAC_STOP_US) {
-        if (sbdac_r.prev_val > 0x80) sbdac_r.prev_val--;
-        else if (sbdac_r.prev_val < 0x80) sbdac_r.prev_val++;
-        else sbdac_r.active = false;
-    }
-}
+// SB16 style band-limited output of the DMA samples (bl_filter.h)
+static bl_state_t sbdsp_bl;
 
 static __force_inline void sbdsp_dma_disable() {
     sbdsp.mode=MODE_NONE;
@@ -386,100 +283,6 @@ static PIC_TimerEvent DSP_DAC_Resume_event = {
 };
 
 
-// ---------------------------------------------------------------------------
-// SB16 style "brickwall" output filter
-// The SB16 band-limits its PCM output just below half the sample rate, and the cutoff
-// moves with the rate (11KHz : nothing above 5.5KHz, 22KHz : nothing above 11KHz).
-// See https://www.vogons.org/viewtopic.php?t=49802
-// Emulated like the DOSBox Staging "sb16" filter : band-limited (windowed sinc)
-// resampling from the DSP rate to the output rate, instead of repeating samples.
-// The kernel is defined in input samples, so the same table gives a cutoff at
-// SBF_CUTOFF x the DSP rate for every rate : no recomputation when the rate changes.
-// ---------------------------------------------------------------------------
-#define SBF_TAPS    48        // Kernel length, in input samples (adds SBF_TAPS/2 samples of latency)
-#define SBF_PHASES_BITS 7                // 128 sub-sample positions of the output (nearest one is used)
-#define SBF_PHASES  (1 << SBF_PHASES_BITS)
-#define SBF_CUTOFF  0.46f     // -6dB point, fraction of the DSP sample rate (0.5 = Nyquist)
-#define SBF_BETA    7.0f      // Kaiser window : ~70dB rejection above the cutoff
-
-static int16_t  sbf_kernel[SBF_PHASES][SBF_TAPS]; // Q15, each phase sums to 1.0
-static int16_t  sbf_hist[SBF_TAPS*2];             // Last input samples, stored twice : no wrap in the filter loop
-static uint32_t sbf_w;                            // Next write index (0..SBF_TAPS-1)
-static uint32_t sbf_pos;                          // Output position between two input samples (Q24)
-static uint32_t sbf_quiet;                        // Nb of silent input samples in a row
-
-static float sbf_bessel_i0(float x) {
-    float sum = 1.0f, term = 1.0f;
-    for (int k = 1; k < 25; k++) {
-        float f = x / (2.0f * k);
-        term *= f * f;
-        sum += term;
-    }
-    return sum;
-}
-
-static void sbf_init() {
-    const float half = SBF_TAPS / 2.0f;
-    const float i0_beta = sbf_bessel_i0(SBF_BETA);
-    float c[SBF_TAPS];
-
-    for (int p = 0; p < SBF_PHASES; p++) {
-        float frac = (float) p / SBF_PHASES;
-        float sum = 0.0f;
-        for (int k = 0; k < SBF_TAPS; k++) {
-            float d = (float) (k - (SBF_TAPS/2 - 1)) - frac;   // Distance to the output point, in input samples
-            float x = 2.0f * SBF_CUTOFF * d;
-            float sinc = (x == 0.0f) ? 1.0f : sinf((float) M_PI * x) / ((float) M_PI * x);
-            float r = d / half;
-            float win = (r * r < 1.0f) ? sbf_bessel_i0(SBF_BETA * sqrtf(1.0f - r * r)) / i0_beta : 0.0f;
-            c[k] = sinc * win;
-            sum += c[k];
-        }
-        for (int k = 0; k < SBF_TAPS; k++) sbf_kernel[p][k] = (int16_t) lrintf(c[k] / sum * 32767.0f);
-    }
-    memset(sbf_hist, 0, sizeof(sbf_hist));
-    sbf_w = 0;
-    sbf_pos = 0;
-    sbf_quiet = SBF_TAPS + 1;
-}
-
-static __force_inline void sbf_push(int16_t sample) {
-    sbf_hist[sbf_w] = sample;
-    sbf_hist[sbf_w + SBF_TAPS] = sample;
-    if (++sbf_w == SBF_TAPS) sbf_w = 0;
-    if (sample) sbf_quiet = 0;
-    else if (sbf_quiet <= SBF_TAPS) sbf_quiet++;
-}
-
-// Read the DSP FIFO (8 bit mono) at the DSP rate, add the filtered samples at the output rate
-static void __not_in_flash_func(sbf_render)(int16_t *buff, uint32_t samples) {
-    uint32_t rate = sbdsp.sample_rate ? sbdsp.sample_rate : 22050;
-    if (rate > 48000) rate = 48000;
-    const uint32_t step = (uint32_t) (((uint64_t) rate << 24) / PM_AUDIO_FREQUENCY);   // Input samples per output sample (Q24)
-
-    for (uint32_t sn = 0; sn < samples * 2; sn += 2) {
-        sbf_pos += step;
-        while (sbf_pos >= (1u << 24)) {
-            sbf_pos -= (1u << 24);
-            int8_t raw;
-            if (afifo_take_sample8(&sbdsp_fifo, &raw)) sbf_push((int16_t) (((uint8_t) raw - 128) * 64));  // Same level as before
-            else if (sbf_quiet > SBF_TAPS) return;   // Nothing to play and the filter is empty : no CPU used
-            else sbf_push(0);                        // FIFO empty : let the filter output fade out
-        }
-
-        const int16_t *h = sbf_kernel[sbf_pos >> (24 - SBF_PHASES_BITS)];
-        const int16_t *x = &sbf_hist[sbf_w];        // Oldest to newest sample
-        int32_t acc = 0;
-        for (int k = 0; k < SBF_TAPS; k++) acc += h[k] * x[k];
-        acc >>= 15;
-        if (acc > 32767) acc = 32767;
-        else if (acc < -32768) acc = -32768;
-
-        buff[sn]   += (int16_t) acc;
-        buff[sn+1] += (int16_t) acc;
-    }
-}
-
 void sbdsp_init()
 {
 
@@ -505,7 +308,9 @@ void sbdsp_init()
 
 
     afifo_init8(&sbdsp_fifo); // initialize the audio FIFO
-    sbf_init();               // SB16 style output filter
+    bl_init();                // SB16 style output filter
+    bl_reset(&sbdsp_bl);
+    ts_dac_init(&sbdsp_dac);  // Direct DAC
 
 #ifdef BOARD_PICOMEM
     PM_INFO("sbdsp_init\n");
@@ -821,7 +626,7 @@ void sbdsp_process(void) {
             if(sbdsp.dav_dsp) {
                 if(sbdsp.current_command_index==1) {
                     sbdsp.cur_sample8=sbdsp.inbox;
-                    sbdac_write(sbdsp.inbox);
+                    ts_dac_write(&sbdsp_dac, sbdsp.inbox);
                     sbdsp.dav_dsp=0;
                     sbdsp.current_command=0;
                 }
@@ -1263,10 +1068,10 @@ if (sbdsp.mainloop_action==DSP_MLC_SENDIRQ) {  // Perform the reset here, to not
 void sbdsp_updatebuffer(int16_t* buff,uint32_t samples)
 {
   // Direct DAC : only a compare when it is not used
-  if (sbdac_r.active || sbdac.head != sbdac_r.tail) sbdac_render(buff, samples);
+  if (ts_dac_pending(&sbdsp_dac)) ts_dac_render(&sbdsp_dac, buff, samples);
 
   if (sbdsp.dma_stereo)
    {
    }
-    else sbf_render(buff, samples);   // 8 bit mono, band-limited to the DSP rate (SB16 like)
+    else bl_render_fifo8(&sbdsp_bl, &sbdsp_fifo, sbdsp.sample_rate ? sbdsp.sample_rate : 22050, buff, samples);   // 8 bit mono
 }

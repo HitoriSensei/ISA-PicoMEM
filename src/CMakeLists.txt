@@ -255,6 +255,7 @@ elseif (PICOMEM_BOARD STREQUAL "PICOMEM_20")
         USE_HWIRQ=1         # for the PicoMEM 1.5, use the extra interrupt lines
         USE_HWDMA=1
         USE_SBDSP=1
+        USE_LPF=1           # SB16 like band-limited filter on SB / Covox / Disney output (0: sample-and-hold, no filter)
         USE_GUS=0
         USE_MPU=0
         SF2_GMGSx=1        # 1 to use the GMGSx sound font

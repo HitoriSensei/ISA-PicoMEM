@@ -48,38 +48,6 @@ int64_t opl_TotalTime=0;
 uint32_t opl_bufferCount=0;
 int64_t starttime;
 
-// Gentle one-pole (RC-style) low-pass "de-harshening" filter applied to the
-// Covox output only. Covox resamples onto the output rate with simple
-// nearest-sample (zero-order-hold) conversion, which is cheap but leaves harsh,
-// spiky aliasing. (The SB DSP has its own SB16 style band-limited resampling,
-// and like on a real SB16 the other sources, OPL included, are not filtered.)
-// A single-pole filter has a gentle -6dB/octave slope, so picking a cutoff
-// above the of game music/SFX (~10kHz) just takes the edge off without muffling
-// the mix.
-#define AUDIO_LPF_CUTOFF_HZ 10000
-
-static int32_t audio_lpf_state_l = 0;
-static int32_t audio_lpf_state_r = 0;
-static int32_t audio_lpf_alpha_q15 = 32768;  // Q15 fixed point, 1.0 = no filtering (set properly in dev_audiomix_start)
-
-static void audio_lpf_init() {
-    double rc = 1.0 / (2.0 * M_PI * (double) AUDIO_LPF_CUTOFF_HZ);
-    double dt = 1.0 / (double) PM_AUDIO_FREQUENCY;
-    double alpha = dt / (rc + dt);
-    audio_lpf_alpha_q15 = (int32_t) (alpha * 32768.0 + 0.5);
-    audio_lpf_state_l = 0;
-    audio_lpf_state_r = 0;
-}
-
-static __force_inline void audio_lpf_apply(int16_t *buff, uint32_t frames) {
-    for (uint32_t i = 0; i < frames; i++) {
-        audio_lpf_state_l += ((buff[i*2]   - audio_lpf_state_l) * audio_lpf_alpha_q15) >> 15;
-        audio_lpf_state_r += ((buff[i*2+1] - audio_lpf_state_r) * audio_lpf_alpha_q15) >> 15;
-        buff[i*2]   = (int16_t) audio_lpf_state_l;
-        buff[i*2+1] = (int16_t) audio_lpf_state_r;
-    }
-}
-
 void oplperf_start()
 {
   starttime = time_us_64();
@@ -144,11 +112,7 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
             }  //mindscape music board (Stereo)
 
          if (dev_audiomix.dev_active & AD_CVX) {
-             int16_t cvx_buffer[PM_SAMPLES_PER_BUFFER*2];
-             memset(cvx_buffer,0,sizeof(cvx_buffer));
-             cvx_updatebuffer(cvx_buffer,PM_SAMPLES_PER_BUFFER);
-             audio_lpf_apply(cvx_buffer, PM_SAMPLES_PER_BUFFER);   // Soften the harsh Covox resampling edge
-             for (int n=0;n<PM_SAMPLES_PER_BUFFER*2;n++) ((int16_t*) buffer)[n] += cvx_buffer[n];
+             cvx_updatebuffer((int16_t*) buffer,PM_SAMPLES_PER_BUFFER);
             }  // Covox (mono)
 
 #if USE_GUS
@@ -178,7 +142,6 @@ printf("Timer IRQ Priority : %x %x %x %x\n",irq_get_priority(TIMER_IRQ_0),irq_ge
    dev_audiomix.enabled=pm_audio_init(0);      // Start the PicoMEM Audio output
    dev_audiomix.dev_active=0;                  // No audio device is mixing
    dev_audiomix.mix_inprogress=false;          // No audio mixing in progress
-   audio_lpf_init();                           // (Re)compute the output de-harshening filter for PM_AUDIO_FREQUENCY
 
    PIC_Init();                                 // Audio devices need the PIC
  }
