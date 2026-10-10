@@ -211,7 +211,7 @@ jobs:
 
           Each directory contains the picomem.uf2 firmware of that variant.
 
-          partition.uf2: partition table, copy it once in BOOTSEL mode before the firmware (see the README).
+          partition.uf2: partition table - must be flashed (once, before FW) if you want to use the "update the firmware via SD/WIFI" feature (see the README).
           EOF
           gh release create "$NAME" "$NAME.zip" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
