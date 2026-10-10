@@ -2158,6 +2158,9 @@ if (pm_display_init(PM_OLED_Type)) ;  // I2C init is here
    dev_post_toinstall=true;
 #endif
     pm_input_init();  // Initialize as well the buttons for the display
+#if PM_FWUPDATE
+    if (pm_fwupdate_refused()) pm_display_fwupdate(PM_OLED_Type, "UPD Failed!");  // In place of the boot screen
+#endif
    }
 pm_i2c0_scan_print();
 

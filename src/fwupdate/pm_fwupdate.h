@@ -11,7 +11,8 @@
 //
 // Needs the partition table installed once: partition.uf2, built next to picomem.uf2 from
 // fwupdate/pm_partitions.json, copied in BOOTSEL mode.
-// Without it nothing is done.
+// Without it nothing is done. A new table can then also be installed from the SD card: put
+// partition.uf2 next to picomem.uf2 (renamed .done / .bad as well).
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,7 @@ extern "C" {
 
 void pm_fwupdate_boot(void);    // Call first in main(): confirms a newly installed firmware
 void pm_fwupdate_check(void);   // Call after the config is loaded: installs picomem.uf2 (reboots)
+bool pm_fwupdate_refused(void); // The update was refused (the PicoMEM starts normally)
 
 #ifdef __cplusplus
 }

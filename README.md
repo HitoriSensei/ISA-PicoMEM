@@ -442,6 +442,13 @@ The PicoMEM 2.0 can update its firmware from the SD card, without USB. The flash
 - The file is renamed `picomem.uf2.done` (or `picomem.uf2.bad`), and the result is written in `fwupdate.txt`. The `picomem.uf2.done` / `picomem.uf2.bad` of a previous update are deleted first: if one can't be deleted (read only for example), nothing is done and `fwupdate.txt` says why.
 - Copying `picomem.uf2` in BOOTSEL mode still works, it also goes in the free slot.
 - The firmware is built as "Try Before You Buy" : it only starts from an update (SD card or BOOTSEL copy) until it has run once. To load it with a debugger (SWD), set `PM_FW_TBYB` to 0 in `src/CMakeLists.txt`.
+- With an OLED screen, "Updating..." is shown during the update, and "UPD Failed!" if the update was refused or failed.
+
+**Partition table update from the SD card :** a board already set up (and running a firmware with this feature) can get a new partition table without USB.
+- Copy `partition.uf2` and `picomem.uf2` (both from the same build) to the root of the SD card, then restart the PicoMEM. `partition.uf2` alone is refused.
+- The table is checked first (picotool partition table with its hash) and the firmware must fit a slot of the new table outside the running one. If the table is the one already installed, only the firmware is updated.
+- The firmware is written first, then the table. The bootrom has two partition table slots (flash 0 and 4 KB) : the new table goes in the free one, then the old one is erased. A power cut during the update still leaves a valid table, but the board may then need the BOOTSEL setup again.
+- Both files are renamed `.done` (or `.bad`), the result is in `fwupdate.txt`.
 
 ## Debug : Sound Blaster I/O log on the SD card (PicoMEM 2.0)
 

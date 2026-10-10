@@ -14,4 +14,5 @@ target_link_libraries(pm_fwupdate INTERFACE
     hardware_flash
     pico_bootrom
     pico_multicore
+    pico_sha256
 )
