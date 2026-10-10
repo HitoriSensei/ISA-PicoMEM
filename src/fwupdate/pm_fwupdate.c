@@ -138,13 +138,22 @@ static int __no_inline_not_in_flash_func(fw_buy)(uint8_t *buf, uint32_t size)
 }
 
 // Same for a forced reload of the partition table from the flash
-static int __no_inline_not_in_flash_func(pt_reload)(uint8_t *buf, uint32_t size)
+static int __no_inline_not_in_flash_func(pt_reload_rom)(uint8_t *buf, uint32_t size)
 {
   rom_load_partition_table_fn load = (rom_load_partition_table_fn)rom_func_lookup_inline(ROM_FUNC_LOAD_PARTITION_TABLE);
   uint32_t irq = save_and_disable_interrupts();
   int rc = load(buf, size, true);
   flash_start_xip();
   restore_interrupts(irq);
+  return rc;
+}
+
+// The bootrom lock checking is on (SDK runtime init): loading the table needs the SHA-256 lock
+static int pt_reload(uint8_t *buf, uint32_t size)
+{
+  if (!bootrom_try_acquire_lock(BOOTROM_LOCK_SHA_256)) return BOOTROM_ERROR_LOCK_REQUIRED;
+  int rc = pt_reload_rom(buf, size);
+  bootrom_release_lock(BOOTROM_LOCK_SHA_256);
   return rc;
 }
 
@@ -352,18 +361,21 @@ static bool pt_program(fw_work_t *w, int s, const uint8_t *blk)
 // else the old table is put back
 static const char *pt_install(fw_work_t *w, pt_work_t *t, int a)
 {
-  int o = 1 - a;
+  static char err[80];
+  int o = 1 - a, rc;
 
   if (!pt_program(w, o, t->blk)) {
       flash_erase(o * PT_SLOT_SIZE, PT_SLOT_SIZE);
       return "partition table verify error";
      }
   flash_erase(a * PT_SLOT_SIZE, PT_SLOT_SIZE);       // Only the new table is valid now
-  if (pt_reload(w->sector0, sizeof(w->sector0)) != 0 || !pt_same(t->p, t->n)) {
+  if ((rc = pt_reload(w->sector0, sizeof(w->sector0))) != 0 || !pt_same(t->p, t->n)) {
+      if (rc) snprintf(err, sizeof(err), "new partition table not taken by the bootrom (load error %d)", rc);
+         else snprintf(err, sizeof(err), "new partition table not taken by the bootrom (other layout loaded)");
       pt_program(w, a, t->old);
       flash_erase(o * PT_SLOT_SIZE, PT_SLOT_SIZE);
       pt_reload(w->sector0, sizeof(w->sector0));
-      return "new partition table not taken by the bootrom";
+      return err;
      }
 
   // Move it to slot 0: a partition.uf2 copied in BOOTSEL mode goes there, it must not have an older
