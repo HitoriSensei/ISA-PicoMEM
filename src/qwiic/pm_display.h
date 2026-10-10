@@ -49,6 +49,7 @@ bool pm_display_init(uint8_t oled_type);
 void pm_display_img_list(uint8_t img_index, uint8_t img_list_nb, FSizeName_t *pm_img_list);
 void pm_display_floppy_confirm(uint8_t choice);
 
+void pm_display_fwupdate(uint8_t oled_type);
 void pm_display_pmhome();
 void pm_display_menu_floppy_select();
 void pm_display_menu_info_select();

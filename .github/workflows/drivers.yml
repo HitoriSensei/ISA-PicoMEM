@@ -36,7 +36,7 @@ jobs:
 
       - name: Zip drivers
         working-directory: drivers
-        run: zip -9 -r "../${{ steps.version.outputs.name }}.zip" .
+        run: zip -9 -r "../${{ steps.version.outputs.name }}.zip" . -x .gitignore
 
       - name: Publish release
         env:

@@ -580,6 +580,23 @@ void pm_display_floppy_confirm(uint8_t choice)
   pm_display.hc_delay=50;   // (5s before going low)
 } 
 
+// Firmware update screen: called before pm_display_init (the screen stays until the reboot)
+void pm_display_fwupdate(uint8_t oled_type)
+{
+  oled_init(&dev_oled_screen,oled_type);
+  if (!dev_oled_screen.enabled) return;
+
+  oledClear(&dev_oled_screen, BLACK);
+  oledDraw_img(&dev_oled_screen,0,0,38,32,oled_elephant_38x32,false);
+
+  oled_setfont(oled_font8x16);
+  const char *buf1 = "Updating...";
+  oledDraw_string(&dev_oled_screen,40 ,LINE_1-4 , buf1, WHITE);
+
+  oledDisplay(&dev_oled_screen);
+  pm_display_contrast(CONTRAST_HIGH);
+}
+
 // PicoMEM Home Screen : Displayed after boot
 void pm_display_pmhome()
 {

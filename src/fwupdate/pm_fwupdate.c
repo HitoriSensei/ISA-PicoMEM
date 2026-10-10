@@ -1,11 +1,12 @@
 // Firmware update from the SD card for the RP2350 (PicoMEM 2.0), using the bootrom A/B partitions.
 //
-// pm_fwupdate_check()  (SD card mounted, core 1 already running the ISA bus)
+// pm_fwupdate_check()  (SD card mounted and config loaded, core 1 already running the ISA bus)
 //   1. Read picomem.uf2 a first time to check it: RP2350 Arm family, all the blocks present,
 //      fits in the slot, contains the PicoMEM 2.0 tag. If refused, the PicoMEM starts normally.
-//   2. Stop core 1 (the PC should be restarted after the update), go back to the boot clock, erase
-//      the free slot and write the image. The first sector (with the IMAGE_DEF) is written last:
-//      an interrupted update leaves no valid image in the slot.
+//   2. Stop core 1 (the PC should be restarted after the update), go back to the boot clock, show
+//      "Updating..." on the OLED screen (if any), erase the free slot and write the image. The first
+//      sector (with the IMAGE_DEF) is written last: an interrupted update leaves no valid image in
+//      the slot.
 //   3. Read the slot back, then reboot with a "flash update" boot of the new slot.
 // pm_fwupdate_boot()   (start of main, before the overclock and core 1)
 //   After a flash update boot, "buy" the new image (TBYB) and erase the start of the other slot:
@@ -35,11 +36,16 @@
 #define FW_FILE       "picomem.uf2"
 #define FW_FILE_DONE  "picomem.uf2.done"
 #define FW_FILE_BAD   "picomem.uf2.bad"
-#define FW_LOG        "fwupdate.txt"     // Result of the last update (no screen at this point)
+#define FW_LOG        "fwupdate.txt"     // Result of the last update
 
 #define UF2_PAYLOAD   256
 
 bool PM_EnableSD();
+
+#if USE_OLED
+extern uint8_t PM_OLED_Type;           // Read from picomem.cfg
+void pm_display_fwupdate(uint8_t oled_type);
+#endif
 
 // Present in every firmware built with this code: an UF2 without it is refused
 static const char fw_tag[] = "PicoMEM firmware for " FW_BOARD;
@@ -343,6 +349,9 @@ void pm_fwupdate_check(void)
   // No way back for this boot: the ISA bus is no more served (the PC must be restarted)
   multicore_reset_core1();
   set_sys_clock_khz(150000, true);   // The flash functions put back the boot flash timing (see BOARD_Init)
+#if USE_OLED
+  pm_display_fwupdate(PM_OLED_Type);  // After the clock change: the I2C baud rate depends on it
+#endif
   PM_INFO("FW update: writing %lu KB at 0x%lx\n", (unsigned long)(end / 1024), (unsigned long)slot.start);
 
   err = write_image(&f, w, &slot, end);

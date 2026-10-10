@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 void pm_fwupdate_boot(void);    // Call first in main(): confirms a newly installed firmware
-void pm_fwupdate_check(void);   // Call after the SD card is mounted: installs picomem.uf2 (reboots)
+void pm_fwupdate_check(void);   // Call after the config is loaded: installs picomem.uf2 (reboots)
 
 #ifdef __cplusplus
 }

@@ -2064,11 +2064,11 @@ wm_drain_fifo();
 
 if (PM_StartSD())
    {
-#if PM_FWUPDATE
-    pm_fwupdate_check();      // Install picomem.uf2 if present (reboots)
-#endif
     if (pm_LoadConfig()==0) BV_CFGInit=0;  // Success
        else BV_CFGInit=0xFD;  // Failed
+#if PM_FWUPDATE
+    pm_fwupdate_check();      // Install picomem.uf2 if present (reboots), after the config for the OLED type
+#endif
     BIOS_SetupDisks();        // Clean the Disk Objects
    } else BV_CFGInit=0xFF;    // Disabled (No Config to load)
 
