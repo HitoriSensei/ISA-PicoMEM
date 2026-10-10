@@ -41,6 +41,7 @@ extern void sbdsp_dma_worker();
 bool dev_sbdsp_active=false;    // True if configured
 volatile uint8_t dev_sbdsp_delay=0;      // counter for the Nb of second since last I/O
 uint16_t dev_sbdsp_baseport;
+static uint8_t dev_sbdsp_type=SBT_2;     // Card emulated by the next install
 
 // Set the IRQ and DMA for the SB
 // IRQ can be 3,5,7
@@ -55,6 +56,24 @@ uint8_t dev_sbdsp_set_irq_dma(uint8_t irq,uint8_t dma)
       PM_ERROR("SBIRQ = PicoMEM IRQ (%d)\n",irq);
       return 1;
      } 
+ return 0;
+}
+
+// Card type from the BLASTER T value, 3 for the Sound Blaster 2.0, 2 or 4 for the Sound Blaster Pro 2.
+// Applied now if the card is installed. Return 0 when Ok
+uint8_t dev_sbdsp_set_type(uint8_t blaster_type)
+{
+ uint8_t type;
+ switch (blaster_type)
+   {
+    case 3: type=SBT_2; break;
+    case 2:
+    case 4: type=SBT_PRO2; break;
+    default: return CMDERR_NOTSUPP;
+   }
+ PM_INFO("Set SB type T%d\n",blaster_type);
+ dev_sbdsp_type=type;
+ if (dev_sbdsp_active && (sbdsp.type!=type)) sbdsp_set_type(type);
  return 0;
 }
 
@@ -73,7 +92,6 @@ uint8_t dev_sbdsp_install(uint16_t baseport)
 
    SetPortType(baseport,DEV_SBDSP,2);
    
-   sbdsp.type=SBT_2;
    dev_sbdsp_active=true;
    dev_sbdsp_disable_mix();
   }
@@ -85,6 +103,7 @@ uint8_t dev_sbdsp_install(uint16_t baseport)
       SetPortType(baseport,DEV_SBDSP,2);
      } 
   dev_sbdsp_baseport=baseport;
+  sbdsp.type=dev_sbdsp_type;
   sbdsp_init();
   return 0;
 }
@@ -95,6 +114,7 @@ void dev_sbdsp_remove()
   {
    dev_sbopl_remove();       // Its FM ports go with it
    dev_sbdsp_active=false;
+   sbdsp_set_type(SBT_NONE); // No mixer, the FM volume is back to the maximum
    dev_sbdsp_disable_mix();
    PM_INFO("Remove SB (%x)\n",dev_sbdsp_baseport);
    DelPortType(DEV_SBDSP);

@@ -23,10 +23,18 @@ code (FM emulation, mixer, `config.txt`) but have not been built or tested with 
   whose cutoff follows the playback rate, as the real SB16's brickwall filter. Images and aliases
   above half the rate drop from 5-10 dB down to about 50 dB down, the treble droop of the old
   sample-and-hold is gone.
-- **DSP Direct DAC (command 10h)** emulated: each write is time stamped and replayed at its real
-  timing through the same filter.
-- **Covox DAC / Disney Sound Source** through the same band-limited filter; the Covox DAC no longer
-  needs a 43 kHz timer interrupt.
+- **Output filter modes**, switched at run time with `PMINIT /lpf x`: 0 none (sample-and-hold),
+  1 SB16 (the band-limited filter above, the default), 2 SB Pro 2 (3.2 kHz low-pass that the
+  program turns on and off through mixer register 0Eh, plus the card's analogue stage), 3 the analogue
+  stage only (8 kHz RC low-pass and DC blocking, as on the SB Pro FM output).
+- **Sound Blaster Pro 2** with `T4` in `BLASTER` (`T3` stays a Sound Blaster 2.0): DSP 3.02, the
+  CT1345 mixer (Voice, MIDI and Master volumes, output filter switch, registers read back as on the
+  CT1600) and the SB Pro stereo DMA output.
+- **DSP Direct DAC (command 10h)** Supported (in SB16 filter mode it goes through analogue stage 
+  only as the moving sinc filter needs a known and stable sample rate).
+  Every write is time-stamped so the samples can be replayed with the same timing way via the mixer.
+- **Covox DAC** replayed the same way, it no longer needs a 43 kHz timer interrupt. The **Disney
+  Sound Source** (6 993 Hz FIFO) goes through the band-limited filter.
 - **Creative CT-VOICE.DRV support (Star Wars X-Wing, ...)**: DSP command E2h answered by DMA into the
   PC memory (needs the PicoMEM BIOS), E2h no longer falls through to "speaker on".
 - **No more freezes while samples play**: the DSP write-status reports busy as a real DSP (drivers
@@ -42,7 +50,7 @@ code (FM emulation, mixer, `config.txt`) but have not been built or tested with 
   modulation timing (feedback FM now sample identical), the chip's log-sine / exponential
   arithmetic, waveform 7, vibrato and tremolo (exact rate, depth and phase), envelopes on the chip's
   shared clock, OPL3 drum panning and second register array.
-- **Analog output stage**: DAC sample-and-hold, the card's RC low-pass (Sound Blaster 1.x / 2.0 by
+- **Analogue output stage**: DAC sample-and-hold, the card's RC low-pass (Sound Blaster 1.x / 2.0 by
   default, Sound Blaster Pro, or none as the SB16) and DC blocking (`OPL_FILTER`).
 - FM output clipped instead of wrapping around on loud passages, and mixed with (no longer erasing)
   the MIDI output.

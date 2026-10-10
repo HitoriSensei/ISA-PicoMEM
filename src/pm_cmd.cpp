@@ -182,6 +182,10 @@ extern uint16_t PM_CfgSBPort;        // Sound Blaster asked in config.txt (pm_di
 extern uint8_t  PM_CfgSBIRQ;
 extern uint8_t  PM_CfgSBDMA;
 extern bool     PM_CfgSBOPL;
+extern uint8_t  PM_CfgSBType;
+#endif
+#if USE_AUDIO
+extern bool bl_set_mode(uint8_t mode);   // Output filter of the SB / Covox / Disney (bl_filter.cpp)
 #endif
 #if USE_HWIRQ
 extern uint8_t PM_CfgIRQ;           // IRQ asked in config.txt (pm_disk.cpp)
@@ -442,6 +446,7 @@ static void PM_sbdsp_Config()
     PM_WARNING("config.txt SB: IRQ %d not jumpered (%X)\n",PM_CfgSBIRQ,BV_HWIRQ);
 #endif
  if (dev_sbdsp_set_irq_dma(PM_CfgSBIRQ,PM_CfgSBDMA)) return;   // Same IRQ as the PicoMEM (logged)
+ dev_sbdsp_set_type(PM_CfgSBType);
  uint8_t res=PM_sbdsp_OnOff(PM_CfgSBPort);
  if (res)
    {
@@ -1187,6 +1192,27 @@ void PM_ExecCMD()
    #if USE_SBDSP
       PM_INFO("SB OPL OnOff: %x\n",PM_CmdDataL);
       PM_CmdDataL=PM_sbopl_OnOff(PM_CmdDataL);
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
+   case CMD_FilterMode:     // Output filter of the SB / Covox / Disney, 0 none 1 SB16 2 SB Pro 2 3 analog stage
+   #if USE_AUDIO
+      PM_INFO("Filter mode: %x\n",PM_CmdDataL);
+      PM_CmdDataL=bl_set_mode(PM_CmdDataL) ? 0 : CMDERR_NOTSUPP;
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
+   case CMD_SetSBType:      // Sound Blaster type, the BLASTER T value, 3 SB 2.0, 2 or 4 SB Pro 2
+   #if USE_SBDSP
+      PM_CmdDataL=dev_sbdsp_set_type(PM_CmdDataL);
    #else
       PM_CmdDataL=CMDERR_NOTSUPP;
    #endif

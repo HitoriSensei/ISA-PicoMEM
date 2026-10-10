@@ -42,9 +42,24 @@ Cleaner digitized sound. `src/audio_devices/bandlimit/`
 - SB16 style "brickwall" filter: band-limited (windowed sinc, 48 taps) resampling to the output
   rate, the cutoff follows the sample rate (just below half of it), for the SB DMA and the
   Covox / Disney output. `USE_LPF` (1 on the PicoMEM 2.0, 0: sample-and-hold, no kernel in RAM).
-- DSP Direct DAC (command 10h) emulated: each CPU write is time stamped by the ISA core and
-  replayed at its real timing through the band-limited filter, its cutoff set from the measured
-  write rate. Same for the Covox DAC. No timer runs when the DAC is not written.
+- Output filter modes, switched at run time with `PMINIT /lpf x` (new command `CMD_FilterMode`, 7Fh),
+  for the SB DMA, SB Direct DAC, Covox and Disney outputs:
+  - 0 none, each sample is held until the next one.
+  - 1 SB16, the band-limited filter. Default, not available with `USE_LPF=0`.
+  - 2 SB Pro 2, the CT1345 mixer output low-pass (3.2 kHz, 2nd order Butterworth) and the analogue
+    stage. Programs turn the low-pass on and off with mixer register 0Eh bit 5, as documented by
+    Creative (on by default and after a mixer reset). With the SB 2.0, which has no mixer, the
+    writes to the mixer ports still switch it, for the programs set up for an SB Pro. The low-pass only applies
+    to the Sound Blaster, the Covox and Disney get the analogue stage.
+  - 3 analogue stage only, the 8 kHz RC low-pass and the DC blocking of the SB Pro FM output stage.
+- DSP Direct DAC (command 10h) emulated: each CPU write is time stamped by the ISA core and the
+  DAC level is replayed at the real write times. Each output sample is the mean level over its
+  20 us, then goes through the IIR filters of the mode. Same for the Covox DAC. No timer runs when
+  the DAC is not written.
+- The Direct DAC and the Covox DAC are not band-limited, they get the analogue stage in the SB16
+  mode. Programs write them from a timer interrupt that other interrupts delay (Jill of the
+  Jungle's FM music handler, every 16 samples), and the band-limited filter, which needs evenly
+  spaced samples, made a step at each late write (crackle, about 400 per second in Jill).
 
 ## OPL3 accuracy, FM analogue output stage
 
@@ -78,6 +93,29 @@ Cleaner digitized sound. `src/audio_devices/bandlimit/`
   multiplies per sample
 - The FM output is now clipped to 16 bit (loud passages wrapped around) and added to the mix
   (previously it erased the MPU output).
+
+## Sound Blaster Pro 2
+
+The Sound Blaster can be emulated as a Sound Blaster Pro 2 (CT1600), with `T4` (or `T2`) in
+`BLASTER` for `PMINIT /sb 1`, or `SB <port> <irq> <dma> 4` in `config.txt`. `T3` (default) stays a
+Sound Blaster 2.0. New command `CMD_SetSBType` (71h), the `BLASTER` T value.
+
+- DSP version 3.02. The SB Pro input mode commands A0h / A8h are accepted (recording is not emulated).
+- CT1345 mixer on base+4 / base+5, with the registers documented by Creative. Voice x Master set the
+  digital audio volume, MIDI x Master the FM volume (also on the AdLib ports, the same chip), left and
+  right. 3 bits per channel from -46 dB to 0 dB, 4 is -11 dB. CD, Line and Mic have no source.
+- Read back as on the CT1600 (hardware notes in `sbmix.cpp`): unused bits of the volumes read 1,
+  0Eh reads 11h after a reset, 00h-1Fh mirror 00h-0Fh, 0Eh is mirrored at 0Fh, reading 00h / 01h
+  reads 0Eh, writing them resets the mixer, nothing above 3Fh (reads FFh).
+- When the card is installed, Voice, Master and MIDI are at the maximum (as set by SBP-SET in DOS), a
+  mixer reset sets them to the documented 4 (-11 dB).
+- SB Pro stereo output: with the mixer stereo switch on, the DMA bytes alternate between the two
+  channels, starting with the right one as on the real card. Creative tells programs to play one
+  silent byte first, which goes right, so their data starts on the left (Quake). The Apogee Sound
+  System (Duke Nukem 3D, Rise of the Triad) plays no silent byte and swaps its channels on the SB
+  Pro instead (`MV_SetReverseStereo` in its released source). The bytes left in the FIFO when
+  stereo starts are dropped.
+- The output filter switch (0Eh bit 5) is used by the SB Pro 2 filter mode (`PMINIT /lpf 2`).
 
 ## Multiple IRQ lines (PicoMEM 1.5 / 2.0)
 
@@ -120,7 +158,8 @@ Star Wars X-Wing (and other CT-VOICE.DRV games) now play their digitised sounds.
   (its layout is fixed by the BIOS binary), the BIOS menu still shows the AdLib On / Off, the port
   is not saved in `picomem.cfg`.
 - `config.txt` `SB`: If Sound Blaster started at boot, like `PMINIT /sb 1`. `SB 0` (off,
-  default), `SB 1` (220h, IRQ 5, DMA 1) or `SB <port> [<irq> [<dma>]]` (e.g. `SB 240 7 3`),
+  default), `SB 1` (220h, IRQ 5, DMA 1) or `SB <port> [<irq> [<dma> [<type>]]]` (e.g. `SB 240 7 3`),
+  the type is the `BLASTER` T value, 3 Sound Blaster 2.0 (default) or 4 Sound Blaster Pro 2,
 - `config.txt` `SBOPL`: `SBOPL 0` to start it without its FM ports (default 1, enabled with `SB`).
 - `config.txt` `JOY 0` / `JOY 1`: USB joystick on the game port
 - `config.txt` `MPU 0` / `MPU 1` (330h) / `MPU <port>` (300, 320, 330, 340, 360): MPU-401 /
@@ -133,7 +172,7 @@ Star Wars X-Wing (and other CT-VOICE.DRV games) now play their digitised sounds.
   (needs `USE_GUS=1`). Valid ports as in PMINIT. The whole card can be configured without PMINIT:
 
   ```
-  SB 220 5 1     # Sound Blaster: 0 (off) / 1 (220 5 1) / port [irq [dma]]
+  SB 220 5 1 3   # Sound Blaster: 0 (off) / 1 (220 5 1) / port [irq [dma [type 3 SB 2.0, 4 SB Pro 2]]]
   SBOPL 1        # its FM ports, base+8/+9
   ADLIB 388      # 0 / 1 (388) / port
   CMS 0          # 0 / 1 (220) / 210-260

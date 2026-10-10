@@ -170,6 +170,9 @@ typedef struct {
 
 static opl_analog_t opl_analog[2];  // Left, Right
 
+// Output gain, left and right (Q15). Set by the SB Pro mixer MIDI and Master volumes (sbdsp.cpp).
+volatile int32_t opl_gain[2] = { 32768, 32768 };
+
 static inline int32_t opl_clip16(int32_t v)
 {
     return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
@@ -209,10 +212,11 @@ void OPL_Pico_stereo_int16(int16_t  *buffer, uint32_t nsamples)
 {
     int32_t *b =opl_buf32s;
     dbopl3.GenerateBlock3(nsamples,b);
+    const int32_t gl = opl_gain[0], gr = opl_gain[1];
 
     for (uint32_t i = 0; i < nsamples*2; i+=2)
     {
-      buffer[i]   = (int16_t) opl_clip16(buffer[i]   + opl_analog_step(&opl_analog[0], b[i]));
-      buffer[i+1] = (int16_t) opl_clip16(buffer[i+1] + opl_analog_step(&opl_analog[1], b[i+1]));
+      buffer[i]   = (int16_t) opl_clip16(buffer[i]   + ((opl_analog_step(&opl_analog[0], b[i])   * gl) >> 15));
+      buffer[i+1] = (int16_t) opl_clip16(buffer[i+1] + ((opl_analog_step(&opl_analog[1], b[i+1]) * gr) >> 15));
     }
 }

@@ -26,9 +26,10 @@ PMINIT /k
 /tdy x    - Tandy sound      (0:Off 1:2C0 or 1E0,C0)<br />
 /cvx x    - Covox DAC sound  (0:Off 1:LPT1 2:LPT2 or 300)<br />
 /mmb x    - Mindscape sound  (0:Off 1:300 or 220,2F0,310,320)<br />
-/sb x     - Sound Blaster    (0:Off 1:On) use the BLASTER values<br />
+/sb x     - Sound Blaster    (0:Off 1:On) use the BLASTER values, T3 SB 2.0, T4 SB Pro 2<br />
 /gus x    - Gravis UltraSound (0:Off 1:On) use the ULTRSND values   **(PicoMEM 2)**<br />
 /mpu x    - General MIDI font (0:Off 1:330 or 300,320,340,360)      **(PicoMEM 2)**<br />
+/lpf x    - SB / Covox output filter (0:None 1:SB16 2:SB Pro 2 3:Analogue stage)<br />
 /font x   - GM Renderer       (0: ArdSynth 1: TinySoundFont)        **(PicoMEM 2)**<br />
 /diag     - Start in Diagnostic Mode <br />
 

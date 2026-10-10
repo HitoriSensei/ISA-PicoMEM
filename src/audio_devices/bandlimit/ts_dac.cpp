@@ -6,15 +6,10 @@
 
 #define TSDAC_LATENCY_US     10000    // Must be > the audio output queue (5 x 64 samples = 7.3ms)
 #define TSDAC_MAX_LAG_US     (TSDAC_LATENCY_US+25000)  // Resync the replay if later than this
-#define TSDAC_MIN_PERIOD_US  20       // Writes faster than 50KHz : only the newest value is kept
-#define TSDAC_MAX_PERIOD_US  2000     // Slower than 500Hz : not a sample rate (pause)
 #define TSDAC_STOP_US        200000   // Fade to silence and stop 200ms after the last write
-#define TSDAC_DEFAULT_PERIOD ((uint32_t) (256 * 1000000ull / 11025))   // Until the rate is measured
 
 void ts_dac_init(ts_dac_t *d) {
     memset(d, 0, sizeof(*d));
-    bl_init();
-    bl_reset(&d->bl);
 }
 
 // Duration of one output sample, from the real I2S rate (same divider computation as audio_i2s.c)
@@ -37,85 +32,72 @@ void __not_in_flash_func(ts_dac_render)(ts_dac_t *d, int16_t *buff, uint32_t sam
         while (tail != head && (int32_t) (now - d->ts[tail & TSDAC_RING_MASK]) > 2 * TSDAC_LATENCY_US) tail++;
         d->tail = tail;
         if (tail == head) return;
-        d->active      = true;
-        d->out_step    = ts_dac_output_step();
-        d->cursor      = (uint64_t) (now - TSDAC_LATENCY_US) << 16;
-        d->anchor      = (now - TSDAC_LATENCY_US) << 8;
-        d->period      = TSDAC_DEFAULT_PERIOD;
-        d->have_period = false;
-        d->last_ts     = now - TSDAC_LATENCY_US;
-        d->have_last   = false;
-        d->level       = 0x80;
-        d->holds       = 0;
-        bl_reset(&d->bl);
+        d->active   = true;
+        d->out_step = ts_dac_output_step();
+        d->cursor   = (uint64_t) (now - TSDAC_LATENCY_US) << 16;
+        d->last_ts  = now - TSDAC_LATENCY_US;
+        d->level    = 0x80;
+        d->holds    = 0;
+        bl_post_clear(&d->post);
     }
 
-    // Keep the replay behind the writes : the whole buffer must be in the past
+    // Keep the replay behind the writes, the whole buffer must be in the past
     int32_t lag = (int32_t) (now - (uint32_t) (d->cursor >> 16));
     int32_t buffer_us = (int32_t) (((uint64_t) samples * d->out_step) >> 16);
     if (lag < buffer_us || lag > TSDAC_MAX_LAG_US) {
         uint32_t t_us = now - TSDAC_LATENCY_US;
         d->cursor = (uint64_t) t_us << 16;
-        d->anchor = t_us << 8;
-        // Writes older than the new replay time are too late to be played : keep the last level only
+        // Writes older than the new replay time are too late to be played, only the last level is kept
         while (tail != head && (int32_t) (d->ts[tail & TSDAC_RING_MASK] - t_us) <= 0) {
             d->level = d->val[tail & TSDAC_RING_MASK];
             d->last_ts = d->ts[tail & TSDAC_RING_MASK];
             tail++;
         }
-        d->have_last = false;
     }
 
+    const uint8_t mode = bl_dac_mode();
     bool stop = false;
     for (uint32_t sn = 0; sn < samples * 2; sn += 2) {
-        const uint32_t t = (uint32_t) (d->cursor >> 8);   // us << 8
+        const uint32_t t0 = (uint32_t) (d->cursor >> 8);   // Output sample start and end, us << 8 (wraps)
         d->cursor += d->out_step;
+        const uint32_t t1 = (uint32_t) (d->cursor >> 8);
 
-        for (;;) {
-            if (tail != head) {
-                uint32_t ts_raw = d->ts[tail & TSDAC_RING_MASK];
-                uint32_t ts = ts_raw << 8;
-                if ((int32_t) (ts - t) <= 0) {     // Written before t : it is the next input sample
-                    uint32_t dt = ts_raw - d->last_ts;
-                    if (d->have_last && dt >= TSDAC_MIN_PERIOD_US && dt <= TSDAC_MAX_PERIOD_US) {   // Measure the write rate
-                        if (d->have_period) d->period += (int32_t) ((dt << 8) - d->period) >> 5;
-                        else { d->period = dt << 8; d->have_period = true; }
-                    }
-                    d->last_ts = ts_raw;
-                    d->have_last = true;
-                    d->level = d->val[tail & TSDAC_RING_MASK];
-                    d->holds = 0;
-                    tail++;
-                    if ((int32_t) (ts - d->anchor) < (TSDAC_MIN_PERIOD_US << 8)) bl_replace_last(&d->bl, bl_sample8u(d->level));
-                    else bl_push(&d->bl, bl_sample8u(d->level));
-                    d->anchor = ts;
-                    continue;
+        // Mean DAC level over the output sample, each value weighted by the time it is held
+        int32_t x = bl_sample8u(d->level);
+        if (tail != head && (int32_t) ((d->ts[tail & TSDAC_RING_MASK] << 8) - t1) < 0) {
+            int32_t acc = 0;
+            uint32_t tc = t0;
+            do {
+                const uint32_t ts = d->ts[tail & TSDAC_RING_MASK] << 8;
+                if ((int32_t) (ts - tc) > 0) {
+                    acc += x * (int32_t) (ts - tc);
+                    tc = ts;
                 }
-                // The next write is known : just wait for it, unless the game paused
-                if ((int32_t) (ts - d->anchor) < (int32_t) (d->period + (d->period >> 1))) break;
+                d->level = d->val[tail & TSDAC_RING_MASK];
+                d->last_ts = d->ts[tail & TSDAC_RING_MASK];
+                d->holds = 0;
+                x = bl_sample8u(d->level);
+                tail++;
+            } while (tail != head && (int32_t) ((d->ts[tail & TSDAC_RING_MASK] << 8) - t1) < 0);
+            acc += x * (int32_t) (t1 - tc);
+            x = acc / (int32_t) (t1 - t0);
+        } else if ((int32_t) (t0 - (d->last_ts << 8)) > (int32_t) (TSDAC_STOP_US << 8)) {
+            // End of the sound, slowly back to 0x80 (no click) in about 40ms, then stop
+            if ((++d->holds & 15) == 0) {
+                if (d->level > 0x80) d->level--;
+                else if (d->level < 0x80) d->level++;
             }
-            // No write : the DAC keeps its level, one input sample per period
-            if ((int32_t) (t - d->anchor) < (int32_t) d->period) break;
-            d->anchor += d->period;
-            if ((int32_t) (t - (d->last_ts << 8)) > (int32_t) (TSDAC_STOP_US << 8)) {
-                // End of the sound : slowly back to 0x80 (no click), then stop
-                if ((++d->holds & 3) == 0) {
-                    if (d->level > 0x80) d->level--;
-                    else if (d->level < 0x80) d->level++;
-                }
-                if (d->level == 0x80 && bl_is_quiet(&d->bl) && tail == head) stop = true;
-            }
-            bl_push(&d->bl, bl_sample8u(d->level));
-            if ((int32_t) (t - d->anchor) > (int32_t) (TSDAC_MAX_PERIOD_US << 8) * 4) d->anchor = t;   // Safety : never loop long
+            if (d->level == 0x80 && tail == head && bl_post_quiet(&d->post, mode)) stop = true;
         }
 
-        uint32_t since = t - d->anchor;
-        uint32_t phase = (since < d->period) ? (since << BL_PHASES_BITS) / d->period : BL_PHASES - 1;
-        int16_t v = (int16_t) bl_output(&d->bl, phase);
+        int16_t v = (int16_t) bl_post(&d->post, x, mode);
         buff[sn]   += v;
         buff[sn+1] += v;
     }
 
     d->tail = tail;
-    if (stop) d->active = false;
+    if (stop) {
+        d->active = false;
+        bl_post_clear(&d->post);
+    }
 }

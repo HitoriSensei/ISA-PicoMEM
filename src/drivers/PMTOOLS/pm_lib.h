@@ -113,6 +113,7 @@ extern void pm_dmadiag();
 
 // 7x Audio commands
 #define CMD_AudioOnOff    0x70  // Full audio rendering 0: Off 1:On
+#define CMD_SetSBType     0x71  // Sound Blaster type, the BLASTER T value, 3 SB 2.0, 2 or 4 SB Pro 2
 
 #define CMD_PS1OnOff      0x72  // PS1 Audio : 0 : Off 1: On default
 #define CMD_AdlibOnOff    0x73  // Adlib Audio : 0 : Off 1: On default (388h) or port, return install status
@@ -127,6 +128,7 @@ extern void pm_dmadiag();
 #define CMD_DSSOnOff      0x7C  // Disney Audio
 #define CMD_MPUOnOff      0x7D  // MPU/General MIDI : 0 : Off 1: On default or port 
 #define CMD_SBOPLOnOff    0x7E  // Sound Blaster FM ports (base+8/+9) : 0 : Off 1: On (SB needed)
+#define CMD_FilterMode    0x7F  // Output filter of the SB / Covox / Disney, 0 none 1 SB16 2 SB Pro 2 3 analog stage
 
 // 8x Disk Commands
 #define CMD_HDD_Getlist   0x80  // Write the list of hdd images into the Disk memory buffer

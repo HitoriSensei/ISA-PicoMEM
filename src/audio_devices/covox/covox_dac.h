@@ -14,7 +14,7 @@
 typedef struct cvx {
     audio_fifo_8_t  *fifo;        // FIFO for the DAC samples
     audio_fifo_8s_t *fifo_stereo; // FIFO for the DAC samples (Stereo)
-    ts_dac_t        *dac;         // Covox DAC : time stamped samples, band-limited to the write rate
+    ts_dac_t        *dac;         // Covox DAC, time stamped samples replayed at their write times
     bl_state_t      bl;           // Disney Sound Source : band-limited output (SB16 like)
 
     uint8_t type=CVX_TYPE_NONE;    // Type of the Covox DAC (0=off, 1=covox, 2=Disney Sound Source)

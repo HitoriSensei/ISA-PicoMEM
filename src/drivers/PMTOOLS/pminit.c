@@ -1,5 +1,5 @@
 #include <conio.h>
-#include <dos.h> 
+#include <dos.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +37,7 @@ uint16_t CVXPortList[] = {0,1,2,0x300};
 uint16_t STEPortList[] = {0,1,2};                                   // Covox Stereo
 uint16_t MPUPortList[] = {0,1,0x300,0x320,0x330,0x340,0x360};
 // DOTT : 330 332 334 336
-// DOOM : 220 230 240 250 300 320 330 332 334 336 340 360 
+// DOOM : 220 230 240 250 300 320 330 332 334 336 340 360
 
 typedef struct sb_conf {
   uint16_t port;
@@ -59,7 +59,7 @@ typedef struct gus_conf {
 gus_conf_t gusconf;
 
 void banner(void) {
-    printf("PicoMEM Init Rev 1.0.2 by FreddyV, 06/2026\n");
+    printf("PicoMEM Init Rev 1.1.0 by FreddyV, Piotr Bosak 10/2026\n");
 }
 
 void usage()
@@ -70,17 +70,18 @@ void usage()
 //    fprintf(stderr, "    /?       - Show this message\n");
     fprintf(stderr, "    /k       - Reinstall the Key Shortcut interrupt\n");
     fprintf(stderr, "    /j x     - Joystick          (0:Off 1:On)\n");
-    fprintf(stderr, "    /adlib x - Adlib sound       (0:Off 1:On) 388 or BLASTER Fxxx, /sb 1 too\n"); 
-    fprintf(stderr, "    /cms x   - CMS sound         (0:Off 1:220 or 210,230,240,250)\n"); 
+    fprintf(stderr, "    /adlib x - Adlib sound       (0:Off 1:On) 388 or BLASTER Fxxx, /sb 1 too\n");
+    fprintf(stderr, "    /cms x   - CMS sound         (0:Off 1:220 or 210,230,240,250)\n");
     fprintf(stderr, "    /tdy x   - Tandy sound       (0:Off 1:2C0 or C0,1E0,300)\n");
     fprintf(stderr, "    /cvx x   - Covox DAC sound   (0:Off 1:LPT1 2:LPT2 or 300)\n");
 //    fprintf(stderr, "    /ste x   - Stereo in One     (0:Off 1:LPT1 2:LPT2)\n");
     fprintf(stderr, "    /mmb x   - Mindscape sound   (0:Off 1:300 or 220,2F0,310,320)\n");
-    fprintf(stderr, "    /sb x    - Sound Blaster     (0:Off 1:On) use the BLASTER values\n");
+    fprintf(stderr, "    /sb x    - Sound Blaster     (0:Off 1:On) BLASTER values, T4 for SB Pro 2\n");
     fprintf(stderr, "    /sbopl x - SB FM, base+8/+9  (0:Off 1:On) /sb 1 enables it\n");
 #if PICOMEM2
     fprintf(stderr, "    /gus x   - Gravis UltraSound (0:Off 1:On) use the ULTRSND values\n");
     fprintf(stderr, "    /mpu x   - General MIDI font (0:Off 1:330 or 300,320,340,360)\n");
+    fprintf(stderr, "    /lpf x   - SB/Covox filter   (0:None 1:SB16 2:SB Pro 2 3:Analog stage)\n");
 #endif
     fprintf(stderr, "    /diag    - Start in Diagnostic Mode\n");
     //              "................................................................................\n"
@@ -104,7 +105,7 @@ void err_sb(void) {
     //              "................................................................................\n"
     fprintf(stderr, "The BLASTER variable is not present or incorrect:\n");
     fprintf(stderr, "\tset BLASTER=Axxx Iy Dz T3\n");
-    fprintf(stderr, "Where xxx = port, y = IRQ, z = DMA. T3 indicates an SB 2.0 compatible card.\n");
+    fprintf(stderr, "Where xxx = port, y = IRQ, z = DMA. T3 emulates an SB 2.0, T4 an SB Pro 2.\n");
 }
 
 void err_gus(void) {
@@ -138,6 +139,8 @@ return false;
 #define CMDERR_MEM_ERR    0x11  // Not enaugh memory
 #define CMDERR_AMIX_FAIL  0x12  // Audio mixer init fail
 
+static const char *filter_names[4] = { "None", "SB16", "SB Pro 2", "Analog stage" };
+
 void display_error(uint8_t err)
 {
  switch(err)
@@ -152,8 +155,10 @@ void display_error(uint8_t err)
                 break;
       case CMDERR_NOIRQ: printf(" No IRQ detected/Available\n");
                 break;
+      case CMDERR_NOTSUPP: printf(" Not supported by this firmware\n");
+                break;
       default:   printf(" Code %d\n",err); break;
-    }    
+    }
 }
 
 void display_valid_ports(uint16_t *table, uint8_t size)
@@ -184,6 +189,18 @@ static uint16_t blaster_fm_port(void) {
         while (*p == ' ') p++;
     }
     return 0x388;
+}
+
+// Card type from BLASTER Txx (decimal, anywhere in the variable), 3 (Sound Blaster 2.0) without it
+static uint16_t blaster_type(void) {
+    char *p = getenv("BLASTER");
+    uint16_t type;
+    while (p && *p) {
+        if (((*p == 'T') || (*p == 't')) && (sscanf(p + 1, "%hu", &type) == 1)) return type;
+        while (*p && (*p != ' ')) p++;      // Next token
+        while (*p == ' ') p++;
+    }
+    return 3;
 }
 
 static int configure_sb(void) {
@@ -217,13 +234,24 @@ static int configure_sb(void) {
         display_error(e);
         return 5;
        }
+    // T2 / T4 Sound Blaster Pro 2 (with the mixer), the other types are emulated by the SB 2.0
+    uint16_t type=blaster_type();
+    if ((type!=2)&&(type!=3)&&(type!=4)) {
+        printf(" - BLASTER T%u is not emulated, Sound Blaster 2.0 (T3) used\n", type);
+        type=3;
+       }
+    if (pm_io_cmd(CMD_SetSBType,type) && (type!=3)) {
+        printf(" - Sound Blaster Pro 2 not supported by this firmware, Sound Blaster 2.0 used\n");
+        type=3;
+       }
     e=pm_io_cmd(CMD_SBOnOff,sbconf.port);
     if (e) {
         printf("SB Enable Error:",e);
         display_error(e);
         return 6;
        }
-    printf(" - Sound Blaster enabled on port %x IRQ %d DMA %d, FM on %x and %x\n", sbconf.port, sbconf.irq, sbconf.dma, sbconf.port + 8, blaster_fm_port());
+    printf(" - Sound Blaster %s enabled on port %x IRQ %d DMA %d, FM on %x and %x\n", (type==3) ? "2.0" : "Pro 2",
+           sbconf.port, sbconf.irq, sbconf.dma, sbconf.port + 8, blaster_fm_port());
     return 0;
 }
 
@@ -261,7 +289,7 @@ static int configure_gus(void) {
         printf("GUS Set IRQ DMA Error:");
         display_error(e);
         return 5;
-       }       
+       }
     printf(" - Gravis UltraSound enabled on port %x IRQ %d DMA %d\n", gusconf.port, gusconf.irq, gusconf.dma);
     return 0;
 }
@@ -299,7 +327,7 @@ int main(int argc, char* argv[]) {
     int sbopl_opt = -1;     // /sb 1 enables them, they can disable them in any order
     bool sb_on = false;     // /sb 1 done: the Adlib is moved to the BLASTER Fxxx port
     int i = 1;
-    while (i < argc) 
+    while (i < argc)
      {
         if (stricmp(argv[i], "/?") == 0) {          // Help
             usage();
@@ -327,12 +355,12 @@ int main(int argc, char* argv[]) {
             printf(" - Diagnostic mode:\n");
             pm_diag();
             return 1;
-            
+
         } else if (stricmp(argv[i], "/dd") == 0) {    // Diagnostic
             printf(" - DMA Diag Mode:\n");
             pm_dmadiag();
             return 1;
-            
+
         } else if (stricmp(argv[i], "/adlib") == 0) { // Adlib
             if (i + 1 >= argc) {
                 usage();
@@ -345,6 +373,18 @@ int main(int argc, char* argv[]) {
             process_port_opt(tmp_uint16);
             if ((tmp_uint16==0)||(tmp_uint16==1)) sbopl_opt=tmp_uint16;
                else printf(" - Sound Blaster FM : Use only 0 or 1\n");
+        } else if (stricmp(argv[i], "/lpf") == 0) {  // Output filter of the SB / Covox / Disney
+            process_port_opt(tmp_uint16);
+            printf(" - SB / Covox filter : ");
+            if (tmp_uint16<=3) {
+                tmp_uint8=pm_io_cmd(CMD_FilterMode,tmp_uint16);
+                if (tmp_uint8) {
+                    printf("Error ");
+                    display_error(tmp_uint8);
+                    return 1;
+                }
+                printf("%s\n",filter_names[tmp_uint16]);
+            } else printf("Use 0 to 3\n");
         } else if (stricmp(argv[i], "/j") == 0) {    // Joystick
             if (i + 1 >= argc) {
                 usage();
@@ -365,24 +405,24 @@ int main(int argc, char* argv[]) {
             printf(" - CMS : ");
             if (check_valid_w(&CMSPortList[0],tmp_uint16,CMS_PORTS))
                {
-                if (tmp_uint16==0) 
+                if (tmp_uint16==0)
                    {
                     printf("Disable\n");
                     pm_io_cmd(CMD_CMSOnOff,0);
                    }
-                  else 
+                  else
                    {
                     tmp_uint8=pm_io_cmd(CMD_CMSOnOff,tmp_uint16);
-                    if (tmp_uint8) 
+                    if (tmp_uint8)
                        {
                         printf(" Enable Error: ",tmp_uint8);
                         display_error(tmp_uint8);
                         return 1;
                        } else printf("Enable (%X)\n",(tmp_uint16 == 1) ? 0x220 : tmp_uint16);
                    }
-                 
+
                  pm_io_cmd(CMD_CMSOnOff,tmp_uint16);
-               } else 
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
                  }
@@ -395,22 +435,22 @@ int main(int argc, char* argv[]) {
             printf(" - Tandy : ");
             if (check_valid_w(&TDYPortList[0],tmp_uint16,TDY_PORTS))
                {
-                if (tmp_uint16==0) 
+                if (tmp_uint16==0)
                    {
                     printf("Disable\n");
                     pm_io_cmd(CMD_TDYOnOff,0);
                    }
-                  else 
+                  else
                    {
                     tmp_uint8=pm_io_cmd(CMD_TDYOnOff,tmp_uint16);
-                    if (tmp_uint8) 
+                    if (tmp_uint8)
                        {
                         printf(" Enable Error: ");
                         display_error(tmp_uint8);
                         return 1;
                        } else printf("Enable (%X)\n",(tmp_uint16 == 1) ? 0x2C0 : tmp_uint16);
                    }
-               } else                 
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
                  }
@@ -423,13 +463,13 @@ int main(int argc, char* argv[]) {
             printf(" - Covox : ");
             if (check_valid_w(&CVXPortList[0],tmp_uint16,CVX_PORTS))
                {
-                if (tmp_uint16==0) 
+                if (tmp_uint16==0)
                   {
                     pm_io_cmd(CMD_CVXOnOff,tmp_uint16);
                     printf("Disable\n");
                   }
-                  else 
-                  { 
+                  else
+                  {
                     switch(tmp_uint16) {
                         case 1: //printf("Nb port: %d LPT1: %x",BIOSVAR->Equip>>14,BIOSVAR->LPT1);
                                 if ((BIOSVAR->Equip>>14>=1)&&(BIOSVAR->LPT1!=0)) { tmp_uint16=BIOSVAR->LPT1; } // Use the BIOS the LPT1 port
@@ -448,17 +488,17 @@ int main(int argc, char* argv[]) {
                         }
                    tmp_uint16+=CVX_TYPE_DAC<<10;   // Set the type in the upper bits
                    tmp_uint8=pm_io_cmd(CMD_CVXOnOff,tmp_uint16);
-                   if (tmp_uint8) 
+                   if (tmp_uint8)
                        {
                         printf(" Enable Error: ",tmp_uint8);
                         display_error(tmp_uint8);
                         return 1;
                        } else printf("Enable (%X)\n",(tmp_uint16 == 1) ? 0x2C0 : tmp_uint16);
-                  }                    
-               } else                 
+                  }
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
-                 } 
+                 }
         } else if (stricmp(argv[i], "/ste") == 0) {    // Covox
             if (i + 1 >= argc) {
                 usage();
@@ -468,13 +508,13 @@ int main(int argc, char* argv[]) {
             printf(" - Stereo in One : ");
             if (check_valid_w(&CVXPortList[0],tmp_uint16,CVX_PORTS))
                {
-                if (tmp_uint16==0) 
+                if (tmp_uint16==0)
                   {
                     pm_io_cmd(CMD_CVXOnOff,tmp_uint16);
                     printf("Disable\n");
                   }
-                  else 
-                  { 
+                  else
+                  {
                     switch(tmp_uint16) {
                         case 1: //printf("Nb port: %d LPT1: %x",BIOSVAR->Equip>>14,BIOSVAR->LPT1);
                                 if ((BIOSVAR->Equip>>14>=1)&&(BIOSVAR->LPT1!=0)) { tmp_uint16=BIOSVAR->LPT1; } // Use the BIOS the LPT1 port
@@ -493,17 +533,17 @@ int main(int argc, char* argv[]) {
                         }
                    tmp_uint16+=CVX_TYPE_DAC_STEREO<<10;   // Set the type in the upper bits
                    tmp_uint8=pm_io_cmd(CMD_CVXOnOff,tmp_uint16);
-                   if (tmp_uint8) 
+                   if (tmp_uint8)
                        {
                         printf(" Enable Error: ",tmp_uint8);
                         display_error(tmp_uint8);
                         return 1;
                        } else printf("Enable (%X)\n",(tmp_uint16 == 1) ? 0x2C0 : tmp_uint16);
-                  }                    
-               } else                 
+                  }
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
-                 } 
+                 }
         } else if (stricmp(argv[i], "/mpu") == 0) {    // Mindscape
             if (i + 1 >= argc) {
                 usage();
@@ -516,14 +556,14 @@ int main(int argc, char* argv[]) {
                 if (tmp_uint16==0) printf("Disable\n");
                   else {
                       tmp_uint8=pm_io_cmd(CMD_MPUOnOff,tmp_uint16);
-                      if (tmp_uint8) 
+                      if (tmp_uint8)
                           {
                            printf(" Enable Error: ",tmp_uint8);
                            display_error(tmp_uint8);
                            return 1;
-                          } else printf("Enable (%x)\n",(tmp_uint16 == 1) ? 0x300 : tmp_uint16);                  
+                          } else printf("Enable (%x)\n",(tmp_uint16 == 1) ? 0x300 : tmp_uint16);
                      }
-               } else 
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
                  }
@@ -539,14 +579,14 @@ int main(int argc, char* argv[]) {
                 if (tmp_uint16==0) printf("Disable\n");
                   else {
                       tmp_uint8=pm_io_cmd(CMD_MMBOnOff,tmp_uint16);
-                      if (tmp_uint8) 
+                      if (tmp_uint8)
                           {
                            printf(" Enable Error: ",tmp_uint8);
                            display_error(tmp_uint8);
                            return 1;
-                          } else printf("Enable (%x)\n",(tmp_uint16 == 1) ? 0x300 : tmp_uint16);                  
+                          } else printf("Enable (%x)\n",(tmp_uint16 == 1) ? 0x300 : tmp_uint16);
                      }
-               } else 
+               } else
                  {
                   printf("Invalid port (%X)\n",tmp_uint16);
                  }
@@ -556,15 +596,15 @@ int main(int argc, char* argv[]) {
                 return 255;
             }
             process_port_opt(tmp_uint16);
-            if (tmp_uint16==0) 
+            if (tmp_uint16==0)
                    {
                     pm_io_cmd(CMD_SBOnOff,0);
                     printf(" - Sound Blaster : Disable\n");
                    }
-                  else 
+                  else
                    {
                     if (configure_sb() == 0) sb_on = true;
-                   }                      
+                   }
         }
          else if (stricmp(argv[i], "/gus") == 0) {    // Gravis UltraSound
             if (i + 1 >= argc) {
@@ -572,16 +612,16 @@ int main(int argc, char* argv[]) {
                 return 255;
             }
             process_port_opt(tmp_uint16);
-            if (tmp_uint16==0) 
+            if (tmp_uint16==0)
                    {
                     pm_io_cmd(CMD_GUSOnOff,0);
                     printf(" - Gravis UltraSound : Disable\n");
                    }
-                  else 
+                  else
                    {
                     configure_gus();
-                   }                      
-        }        
+                   }
+        }
         ++i;
      }
 
@@ -613,8 +653,8 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
- /*           e = sscanf(argv[++i], "%hu", &buffer_size); 
+ /*           e = sscanf(argv[++i], "%hu", &buffer_size);
             if (e != 1 || buffer_size < 1 || buffer_size > 256) {
-                usage(); 
+                usage();
                 return 3;
             } */

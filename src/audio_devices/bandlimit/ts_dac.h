@@ -1,10 +1,10 @@
 #pragma once
 // Time stamped DAC : for the DACs written by the CPU at its own (unknown, possibly irregular)
 // rate, like the SB Direct DAC (command 0x10) or the Covox.
-// Each write is time stamped by the ISA core. The mixer replays the samples at their real
-// timing, TSDAC_LATENCY_US behind, through the SB16 style band-limited filter (bl_filter.h).
-// The write rate is measured from the time stamps and sets the filter cutoff (0.46 x rate).
-// Nothing runs (no timer) when the DAC is not written.
+// Each write is time stamped by the ISA core. The mixer replays the DAC level at the real write
+// times, TSDAC_LATENCY_US behind. Each output sample is the mean level over its duration, then
+// goes through the IIR filters of the mode (bl_dac_mode in bl_filter.h, the analog stage in the
+// SB16 mode). Nothing runs (no timer) when the DAC is not written.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -25,14 +25,10 @@ typedef struct {
     uint32_t tail;
     uint64_t cursor;      // Replay time, us << 16
     uint32_t out_step;    // Output sample duration, us << 16
-    uint32_t anchor;      // Time of the newest filter input sample, us << 8 (wraps)
-    uint32_t period;      // Measured write period, us << 8
-    bool     have_period;
     uint32_t last_ts;     // Last write time, us
-    bool     have_last;   // last_ts is a real write (rate measurement)
     uint8_t  level;       // Current DAC value
-    uint8_t  holds;       // Hold counter (end of sound fade)
-    bl_state_t bl;
+    uint8_t  holds;       // Output samples counter of the end of sound fade
+    bl_post_t post;       // IIR filters
 } ts_dac_t;
 
 void ts_dac_init(ts_dac_t *d);

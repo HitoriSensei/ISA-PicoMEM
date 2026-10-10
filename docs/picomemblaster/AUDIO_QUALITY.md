@@ -10,7 +10,7 @@ of October 4 2026), measured against a target for each part:
 All curves come from a software-only analysis of the sample output, not from recordings of the
 devices. The audio code of each firmware (the official PicoMEM firmware from its `origin/main`
 sources, PicoMemBlaster from this repository) was built for a PC and fed the same input, and the
-samples it produced were analysed directly, before any DAC or analog output. Both mix at
+samples it produced were analysed directly, before any DAC or analogue output. Both mix at
 49 716 Hz (the OPL chip rate). Real cards were measured only for the SB16 filter target, by other
 people (see below).
 
@@ -48,10 +48,17 @@ where the SB16 is silent).
   kernel is in input samples, so the cutoff follows any rate with one table), stopband 50 to 65 dB.
   It follows the SB16 target; the real card's transition is a little steeper, and at 44 kHz the
   top of the band (above about 19 kHz) rolls off early.
-- The same filter is used for the **Covox / Disney** outputs: the Disney Sound Source at its
-  6 993 Hz FIFO rate, the Covox DAC at the rate the program writes it (measured from the write
-  time stamps, as the SB Direct DAC, command 10h).
+- The same filter is used for the **Disney Sound Source** output, at its 6 993 Hz FIFO rate.
+- The DACs written by the CPU (SB Direct DAC, command 10h, and the **Covox DAC**) are not
+  band-limited, they get the analogue stage in the SB16 mode. Their writes come from a timer
+  interrupt that other interrupts delay, and the band-limited filter, which needs evenly spaced
+  samples, made a step at each late write. The DAC level is replayed at the real write times, each
+  output sample being the mean level over its 20 us.
 - `USE_LPF=0` in `src/CMakeLists.txt` goes back to sample-and-hold (no 12 KB kernel in RAM).
+- `PMINIT /lpf x` changes the filter at run time. 0 is sample-and-hold with no filter, 1 this SB16
+  filter, 2 the SB Pro 2 (its 3.2 kHz 2nd order low-pass, which the program switches with mixer
+  register 0Eh bit 5, then the analogue stage), 3 only the analogue stage (8 kHz RC low-pass and DC
+  blocking, the SB Pro FM output stage).
 
 ## FM: faithfulness to the OPL3 chip
 
@@ -63,7 +70,7 @@ where the SB16 is silent).
 
 ![PicoMemBlaster FM vs Nuked OPL3](fm_picomemblaster_vs_nuked.png)
 
-Same register writes into both, 16 bit chip output (before the analog stage below), aligned to the
+Same register writes into both, 16 bit chip output (before the analogue stage below), aligned to the
 best lag. Left: the target, middle: the firmware, right: the difference in 1/6 octave bands (red:
 louder than the chip, blue: quieter, grey: both silent). The band difference is the timbre
 comparison; the waveform SNR also counts harmless phase differences.
@@ -111,14 +118,14 @@ sample, 20 µs, of skew on the left that only a sample-by-sample comparison show
 Matching them exactly would need Nuked OPL3 itself, about twice the CPU, but the near 
 undistinguishable acoustic difference is not worth the PicoMEM CPU cost.
 
-### Analog output stage
+### Analogue output stage
 
 The chip's 16-bit output then goes through the card: the DAC holds each sample, an RC low-pass
 smooths it, and a coupling capacitor removes the DC. PicoMemBlaster simulates it (`OPL_FILTER`):
 1 (default) Sound Blaster 1.x / 2.0, 12 kHz; 2 Sound Blaster Pro, 8 kHz; 0 none, as the SB16
 (whose FM output is unfiltered). The official PicoMEM firmware has no output stage.
 
-![FM analog output stage response](fm_analog_stage.png)
+![FM analogue output stage response](fm_analog_stage.png)
 
 ## CPU and RAM cost
 
@@ -137,5 +144,5 @@ rate, as the share of the processing power of one RP2350 core running at 360 MHz
 
 RAM: +19 KB static (12 KB filter kernel, 5.5 KB SB Direct DAC buffer, 0.9 KB OPL), +4.3 KB while
 the Covox DAC is on. The SB / Covox cost is the band-limited filter (`USE_LPF=0` removes it), the
-FM cost is the analog stage (0.9 % while FM is on, `OPL_FILTER=0` removes it) and the chip
+FM cost is the analogue stage (0.9 % while FM is on, `OPL_FILTER=0` removes it) and the chip
 arithmetic (about 0.1 % per playing voice).

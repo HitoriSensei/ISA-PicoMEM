@@ -901,6 +901,7 @@ uint16_t PM_CfgSBPort=0;       // 0: Off
 uint8_t  PM_CfgSBIRQ=5;
 uint8_t  PM_CfgSBDMA=1;
 bool     PM_CfgSBOPL=true;     // SB FM ports (base+8/+9)
+uint8_t  PM_CfgSBType=3;       // BLASTER T value, 3 SB 2.0, 4 SB Pro 2
 #endif
 
 // MPU-401 / General MIDI started at boot (config.txt MPU), firmware only. CFG_PORT_UNSET: not in
@@ -994,6 +995,7 @@ PM_CfgSBPort=0;
 PM_CfgSBIRQ=5;
 PM_CfgSBDMA=1;
 PM_CfgSBOPL=true;
+PM_CfgSBType=3;
 #endif
 BV_TdyRAM=0;
 BV_Tandy=0;
@@ -1138,21 +1140,23 @@ PM_INFO("Read 0:/config.txt\n");
              }
         }
 #if USE_SBDSP
-        if (cfg_key(buf, "SB ")) {      // SB 0 / SB 1 (220 5 1) / SB <port hex> [<irq> [<dma>]]
-           unsigned int port, irq=5, dma=1;
-           if (sscanf(buf, "%*s %x %u %u", &port, &irq, &dma) >= 1)
+        if (cfg_key(buf, "SB ")) {      // SB 0 / SB 1 (220 5 1 3) / SB <port hex> [<irq> [<dma> [<type>]]]
+           unsigned int port, irq=5, dma=1, type=3;   // Type is the BLASTER T value, 3 SB 2.0, 4 SB Pro 2
+           if (sscanf(buf, "%*s %x %u %u %u", &port, &irq, &dma, &type) >= 1)
              {
               if (port==1) port=0x220;
               if (port==0) PM_CfgSBPort=0;
                else if (((port & 0x0F)==0) && (port>=0x210) && (port<=0x280)
-                        && ((irq==3)||(irq==5)||(irq==7)) && ((dma==1)||(dma==3)))
+                        && ((irq==3)||(irq==5)||(irq==7)) && ((dma==1)||(dma==3))
+                        && ((type==2)||(type==3)||(type==4)))
                     {
                      PM_CfgSBPort=port;
                      PM_CfgSBIRQ=irq;
                      PM_CfgSBDMA=dma;
+                     PM_CfgSBType=type;
                     }
-               else PM_WARNING("SB: invalid %X %d %d (port 210-280, IRQ 3/5/7, DMA 1/3)\n",port,irq,dma);
-              PM_INFO("> SB %X %d %d\n",PM_CfgSBPort,PM_CfgSBIRQ,PM_CfgSBDMA);
+               else PM_WARNING("SB: invalid %X %d %d %d (port 210-280, IRQ 3/5/7, DMA 1/3, type 3/4)\n",port,irq,dma,type);
+              PM_INFO("> SB %X %d %d T%d\n",PM_CfgSBPort,PM_CfgSBIRQ,PM_CfgSBDMA,PM_CfgSBType);
              }
         }
         if (cfg_key(buf, "SBOPL ")) {   // SB FM ports (base+8/+9) with the SB: SBOPL 0 / 1
