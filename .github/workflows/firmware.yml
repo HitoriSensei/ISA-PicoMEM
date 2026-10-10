@@ -155,8 +155,8 @@ jobs:
 
       - name: Collect firmware
         run: |
-          mkdir -p out
-          cp "$BUILD_DIR/picomem.uf2" "out/picomem2-${{ matrix.variant }}.uf2"
+          mkdir -p "out/${{ matrix.variant }}"
+          cp "$BUILD_DIR/picomem.uf2" "out/${{ matrix.variant }}/picomem.uf2"
           cp "$BUILD_DIR/partition.uf2" out/partition.uf2
 
       - name: Upload firmware
@@ -186,11 +186,12 @@ jobs:
           now=$(date -u +%s)
           echo "name=PMB-fw-$(date -u -d "@$now" +%Y-%m-%d)-$(printf '%05d' $((now % 86400)))" >> "$GITHUB_OUTPUT"
 
+      # One directory per variant, each with its picomem.uf2, and partition.uf2 at the root
       - name: Zip firmware
+        working-directory: fw
         run: |
-          cd fw
-          ls -l
-          zip -9 "../${{ steps.version.outputs.name }}.zip" ./*.uf2
+          find . -type f | sort
+          zip -9 -r "../${{ steps.version.outputs.name }}.zip" .
 
       - name: Publish release
         env:
@@ -200,13 +201,15 @@ jobs:
           cat > notes.md <<EOF
           PicoMEM 2.0 firmware built from ${GITHUB_SHA}.
 
-          | File | GUS | MPU | SB I/O log |
-          |------|-----|-----|------------|
-          | picomem2-gus-mpu.uf2 | yes | yes | no |
-          | picomem2-gus.uf2 | yes | no | no |
-          | picomem2-mpu.uf2 | no | yes | no |
-          | picomem2-nogus-nompu.uf2 | no | no | no |
-          | picomem2-debug-sbiolog.uf2 | yes | yes | yes (sbiolog.txt on the SD card) |
+          | Directory | GUS | MPU | SB I/O log |
+          |-----------|-----|-----|------------|
+          | gus-mpu/ | yes | yes | no |
+          | gus/ | yes | no | no |
+          | mpu/ | no | yes | no |
+          | nogus-nompu/ | no | no | no |
+          | debug-sbiolog/ | yes | yes | yes (sbiolog.txt on the SD card) |
+
+          Each directory contains the picomem.uf2 firmware of that variant.
 
           partition.uf2: partition table, copy it once in BOOTSEL mode before the firmware (see the README).
           EOF
