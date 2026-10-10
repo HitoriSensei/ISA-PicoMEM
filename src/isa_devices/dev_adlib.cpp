@@ -26,32 +26,90 @@ If not, see <https://www.gnu.org/licenses/>.
 #include "dev_adlib.h"
 #include "opl.h"
 
-dev_adl_t dev_adlib = {false,0};
+dev_adl_t dev_adlib = {false,0,0x388};
+volatile bool dev_sbopl_active=false;
 
-uint8_t dev_adlib_install()
+static bool opl_in_use()
 {
- if (!dev_adlib.active)   // Don't re enable if active
-  {
-   PM_INFO("Install OPL2 (0x388)\n");
+ return dev_adlib.active || dev_sbopl_active;
+}
 
+// Start the OPL chip with the first port set (before its ports are answered)
+static void opl_start()
+{
+ if (!opl_in_use())
+  {
    OPL_Pico_Init(0x388);
-   SetPortType(0x388,DEV_ADLIB,1);   
-   dev_adlib.active=true;
    dev_adlib_disable_mix();
   }
-  return 0;
+}
+
+// Stop the OPL chip with the last port set (after its ports are removed)
+static void opl_stop()
+{
+ if (!opl_in_use())
+  {
+   OPL_Pico_Shutdown();
+   dev_adlib_disable_mix();
+  }
+}
+
+// port: 8 ports block (the registers are decoded from port & 7), 100h to 3F8h
+// Moves the AdLib if already installed on an other port. Return 0 When Ok
+uint8_t dev_adlib_install(uint16_t port)
+{
+ if ((port & 7) || (port < 0x100) || (port > 0x3F8))
+  {
+   PM_ERROR("Invalid Adlib port (%x)\n",port);
+   return CMDERR_BADPORT;
+  }
+ if (dev_adlib.active && (port == dev_adlib.port)) return 0;   // Don't re enable if active
+ uint8_t used = GetPortType(port);
+ if ((used != DEV_NULL) && (used != DEV_ADLIB))
+  {
+   PM_ERROR("Adlib port %x already used (%d)\n",port,used);
+   return CMDERR_PORTUSED;
+  }
+ PM_INFO("Install OPL2 (%x)\n",port);
+ if (dev_adlib.active) DelPortType(DEV_ADLIB);   // Move
+   else opl_start();
+ SetPortType(port,DEV_ADLIB,1);
+ dev_adlib.port=port;
+ dev_adlib.active=true;
+ return 0;
 }
 
 void dev_adlib_remove()
 {
  if (dev_adlib.active)       // Don't stop if not active
   {
-   PM_INFO("Remove OPL2 (0x388)\n");
+   PM_INFO("Remove OPL2 (%x)\n",dev_adlib.port);
 
-   OPL_Pico_Shutdown();
    DelPortType(DEV_ADLIB);  
    dev_adlib.active=false;
-   dev_adlib_disable_mix();  
+   opl_stop();
+  }
+}
+
+// Sound Blaster FM ports (base+8/+9, +A/+B): the SB ports are dev_sbdsp's, only answered for the
+// FM part while enabled
+void dev_sbopl_install()
+{
+ if (!dev_sbopl_active)
+  {
+   PM_INFO("Install SB OPL (base+8)\n");
+   opl_start();
+   dev_sbopl_active=true;
+  }
+}
+
+void dev_sbopl_remove()
+{
+ if (dev_sbopl_active)
+  {
+   PM_INFO("Remove SB OPL (base+8)\n");
+   dev_sbopl_active=false;
+   opl_stop();
   }
 }
 

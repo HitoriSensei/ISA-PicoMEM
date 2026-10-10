@@ -155,9 +155,37 @@ void dev_audiomix_resume() {}
 #if USE_NE2000
 extern "C" {
 #include "ne2000/dev_ne2000.h"
+#if PM_HTTP
+#include "httpd/pm_httpd.h"
+#endif
 extern wifi_infos_t PM_Wifi;
 }
 #endif
+#endif
+
+#if PM_FWUPDATE
+#include "fwupdate/pm_fwupdate.h"
+#endif
+#include "sbdsp/sbdsp_iolog.h"
+
+extern uint16_t PM_CfgAdlibPort;     // Adlib port asked in config.txt (pm_disk.cpp)
+extern uint16_t PM_CfgMPUPort;       // MPU asked in config.txt (pm_disk.cpp), CFG_PORT_UNSET: no line
+extern uint16_t PM_CfgCVXPort;       // Covox / Disney asked in config.txt (pm_disk.cpp), CFG_PORT_UNSET: no line
+extern bool     PM_CfgCVXDisney;
+#if USE_GUS
+extern uint16_t PM_CfgGUSPort;       // GUS asked in config.txt (pm_disk.cpp), 0: Off
+extern uint8_t  PM_CfgGUSIRQ;
+extern uint8_t  PM_CfgGUSDMA;
+#endif
+#if USE_SBDSP
+extern uint16_t PM_CfgSBPort;        // Sound Blaster asked in config.txt (pm_disk.cpp), 0: Off
+extern uint8_t  PM_CfgSBIRQ;
+extern uint8_t  PM_CfgSBDMA;
+extern bool     PM_CfgSBOPL;
+#endif
+#if USE_HWIRQ
+extern uint8_t PM_CfgIRQ;           // IRQ asked in config.txt (pm_disk.cpp)
+static bool PM_IRQDetectEnd=false;  // The next CMD_IRQAck ends the BIOS IRQ detection
 #endif
 
 #if USE_USBHOST
@@ -249,17 +277,20 @@ uint8_t  SD_Freq=20;
 // ***** Audio On / On Code  *****
 // *******************************
 #if USE_AUDIO
-void PM_Adlib_OnOff(uint16_t state)
+// state: 0 Off, 1 On (388h) or port. Return 0 When Ok
+uint8_t PM_Adlib_OnOff(uint16_t state)
 {
  if (state)
      {
-      PM_INFO(">Adlib On\n");      
-      dev_adlib_install();           // Will not reinstall if already installed
+      if (state==1) state=0x388;    // Default Adlib port
+      PM_INFO(">Adlib On %x\n",state);
+      return dev_adlib_install(state);  // Will not reinstall if already installed there
      }
      else
      {
       PM_INFO(">Adlib Off\n");
       dev_adlib_remove();
+      return 0;
      }
 
 } //PM_Adlib_OnOff
@@ -364,7 +395,11 @@ uint8_t PM_sbdsp_OnOff(uint16_t state)
       if (state==1) state=0x220;    // Default SB DSP port
       PM_INFO(">SB DSP On %x\n",state);
       res=dev_sbdsp_install(state);
-      if (!res) dev_adlib_install();  // If SB DSP is installed, Add Adlib
+      if (!res)
+        {                         // SB DSP installed: add its FM ports and the AdLib (388h)
+         dev_sbopl_install();     // /sbopl 0 and /adlib 0 can remove them after
+         dev_adlib_install(dev_adlib.port);   // Last Adlib port (PMINIT sets BLASTER Fxxx after)
+        }
       return res;
      }
      else
@@ -374,6 +409,48 @@ uint8_t PM_sbdsp_OnOff(uint16_t state)
       return 0;
      }
 } //PM_sbdsp_OnOff
+
+// Sound Blaster FM ports (base+8/+9) On/Off, the SB DSP must be installed to enable them
+// Return 0 When Ok
+uint8_t PM_sbopl_OnOff(uint16_t state)
+{
+ if (state)
+     {
+      if (!dev_sbdsp_installed()) return CMDERR_NOTSUPP;
+      PM_INFO(">SB OPL On\n");
+      dev_sbopl_install();
+     }
+     else
+     {
+      PM_INFO(">SB OPL Off\n");
+      dev_sbopl_remove();
+     }
+ return 0;
+} //PM_sbopl_OnOff
+
+// Sound Blaster from config.txt (SB / SBOPL) at boot, as PMINIT /sb 1 [/sbopl 0]. The Adlib it
+// enables is removed if the Adlib is Off (config.txt ADLIB 0 / BIOS menu), as /sb 1 /adlib 0
+static void PM_sbdsp_Config()
+{
+ if (BV_IRQ==0)
+   {
+    PM_ERROR("config.txt SB: no PicoMEM IRQ (the PicoMEM BIOS is needed)\n");
+    return;
+   }
+#if USE_HWIRQ
+ if (!((BV_HWIRQ>>PM_CfgSBIRQ)&1))
+    PM_WARNING("config.txt SB: IRQ %d not jumpered (%X)\n",PM_CfgSBIRQ,BV_HWIRQ);
+#endif
+ if (dev_sbdsp_set_irq_dma(PM_CfgSBIRQ,PM_CfgSBDMA)) return;   // Same IRQ as the PicoMEM (logged)
+ uint8_t res=PM_sbdsp_OnOff(PM_CfgSBPort);
+ if (res)
+   {
+    PM_ERROR("config.txt SB %X: install error %d\n",PM_CfgSBPort,res);
+    return;
+   }
+ if (!PM_CfgSBOPL) PM_sbopl_OnOff(0);
+ if (!PM_Config->Adlib) PM_Adlib_OnOff(0);
+} //PM_sbdsp_Config
 #endif //USE_SBDSP
 
 // Return 0 When Ok
@@ -432,19 +509,38 @@ void PM_Audio_OnOff(uint8_t state)
   if (state)
     {
      // PM_Config->MMBPort=0x300;
-      PM_Adlib_OnOff(PM_Config->Adlib);
+      PM_Adlib_OnOff(PM_Config->Adlib ? PM_CfgAdlibPort : 0);   // config.txt ADLIB 0 / 1 / port
       PM_CMS_OnOff(PM_Config->CMSPort);
       PM_TDY_OnOff(PM_Config->TDYPort);
       PM_MMB_OnOff(PM_Config->MMBPort);
-//      PM_CVX_OnOff(0);  //Off by default (Configured by PMInit)
+      if (PM_CfgCVXPort!=CFG_PORT_UNSET)   // config.txt CVX / DSS, else left as it is (PMINIT)
+        {
+         dev_cvx_remove();
+         if (PM_CfgCVXPort)
+           {
+            uint8_t res=dev_cvx_install(PM_CfgCVXDisney ? CVX_TYPE_DISNEY : CVX_TYPE_DAC,PM_CfgCVXPort);
+            if (res) PM_ERROR("config.txt CVX/DSS %X: install error %d\n",PM_CfgCVXPort,res);
+           }
+        }
 #if USE_SBDSP      
       PM_sbdsp_OnOff(0);          // Set SB Off by default
+      if (PM_CfgSBPort) PM_sbdsp_Config();   // config.txt SB
 #endif
 #if USE_GUS
       PM_gus_OnOff(0);            // Set GUS Off by default
+      if (PM_CfgGUSPort)          // config.txt GUS, as PMINIT /gus 1
+        {
+         uint8_t res=PM_gus_OnOff(PM_CfgGUSPort);
+         if (!res) res=dev_gus_set_irq_dma(PM_CfgGUSIRQ,PM_CfgGUSDMA);
+         if (res) PM_ERROR("config.txt GUS %X: install error %d\n",PM_CfgGUSPort,res);
+        }
 #endif      
-#if USE_MPU // Don't stop MPU at reboot for the moment
-    //  dev_mpu_install(0x330);
+#if USE_MPU // Without config.txt MPU, don't stop MPU at reboot for the moment
+      if (PM_CfgMPUPort!=CFG_PORT_UNSET)
+        {
+         uint8_t res=PM_MPU_OnOff(0,PM_CfgMPUPort);    // config.txt MPU 0 / 1 / port
+         if (res) PM_ERROR("config.txt MPU %X: install error %d\n",PM_CfgMPUPort,res);
+        }
 #endif
 #if I2S_QWIIC_SHARES // When I2S and QwiiC are shared, Stop all QwiiC access when Audio is ON
 #else
@@ -821,12 +917,26 @@ void PM_ExecCMD()
 #endif
      busy_wait_ms(20);       // Wait a little more at the end
      PM_INFO("IRQ Detected: %d Mask %X\n",BV_IRQ,BV_HWIRQ);
+#if USE_HWIRQ
+     PM_IRQDetectEnd=true;
+#endif
      PM_Status=STAT_READY;
      break;
 
    case CMD_IRQAck :       // CMD: Acknowledge IRQ
      PM_INFO("CMD_IRQAck\n");
      SVAR_IRQ->PM_IRR=0;
+#if USE_HWIRQ
+     // Sent by the BIOS at the end of its IRQ detection, with the interrupts disabled. The BIOS took
+     // the highest jumper as the PicoMEM IRQ: use the config.txt one instead if its jumper was found.
+     // The other detected IRQs stay available as ISA IRQ lines for the emulated devices (BV_HWIRQ).
+     if (PM_IRQDetectEnd)
+        {
+         PM_IRQDetectEnd=false;
+         if (PM_CfgIRQ && ((BV_HWIRQ>>PM_CfgIRQ)&1)) BV_IRQ=PM_CfgIRQ;
+         PM_INFO("PicoMEM IRQ: %d (config %d, jumpers %X)\n",BV_IRQ,PM_CfgIRQ,BV_HWIRQ);
+        }
+#endif
      PM_Status=STAT_READY;
      break;
 
@@ -1009,8 +1119,8 @@ void PM_ExecCMD()
       PM_Status=STAT_READY;      
      break;
 
-   case CMD_AdlibOnOff:      // Adlib Audio : 0 : Off 1: On default
-      arg=(uint16_t)PM_CmdDataL;   
+   case CMD_AdlibOnOff:      // Adlib Audio : 0 : Off 1: On default (388h) or port, return install status
+      arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
       PM_INFO("Adlib OnOff: %x\n",arg);  
       if (arg)
        { // If enable device, start audio mix
@@ -1020,8 +1130,7 @@ void PM_ExecCMD()
 #endif
         dev_audiomix_start();            // Start Audio if not on
        }   
-      PM_Adlib_OnOff(arg);
-      PM_CmdDataL=0;
+      PM_CmdDataL=PM_Adlib_OnOff(arg);
       PM_CmdDataH=0;
       PM_Status=STAT_READY;
      break;
@@ -1070,6 +1179,17 @@ void PM_ExecCMD()
         dev_audiomix_start();            // Start Audio if not on
        }
       PM_CmdDataL=PM_MMB_OnOff(arg);
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
+   case CMD_SBOPLOnOff:     // Sound Blaster FM ports (base+8/+9) : 0 : Off 1: On (SB DSP needed)
+   #if USE_SBDSP
+      PM_INFO("SB OPL OnOff: %x\n",PM_CmdDataL);
+      PM_CmdDataL=PM_sbopl_OnOff(PM_CmdDataL);
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
       PM_CmdDataH=0;
       PM_Status=STAT_READY;
      break;
@@ -1944,6 +2064,9 @@ wm_drain_fifo();
 
 if (PM_StartSD())
    {
+#if PM_FWUPDATE
+    pm_fwupdate_check();      // Install picomem.uf2 if present (reboots)
+#endif
     if (pm_LoadConfig()==0) BV_CFGInit=0;  // Success
        else BV_CFGInit=0xFD;  // Failed
     BIOS_SetupDisks();        // Clean the Disk Objects
@@ -2084,7 +2207,12 @@ if (WifiRes!=0)
     PM_Config->ne2000Port=0;
     PM_ERROR("\nWifi Init Err : %d\n",WifiRes);
    }
-   else BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+   else {
+    BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+#if PM_HTTP
+    pm_httpd_init();       // Start the HTTP server if http.txt is on the SD card
+#endif
+   }
 
 #endif //
 #endif // 
@@ -2210,6 +2338,14 @@ if (USB_Host_Enabled)
 
 #if !BOARD_WM10
 if (dev_audiomix.enabled) pm_audio_domix();
+#endif
+
+#if PM_HTTP
+if (BV_WifiInit==INIT_DONE) pm_httpd_task();  // HTTP server network polling and transfers
+#endif
+
+#if SBDSP_IOLOG
+sbdsp_iolog_task();  // Write the I/O log to the SD card
 #endif
 
 absolute_time_t pm_delay_delta=absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay);

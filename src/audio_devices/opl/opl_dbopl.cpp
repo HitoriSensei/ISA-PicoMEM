@@ -60,7 +60,10 @@ static int32_t opl_buf32s[2*PM_SAMPLES_PER_BUFFER];   // interleaved stereo
 
 int OPL_Pico_Init(unsigned int port_base)
 {
-    dbopl3.Setup(49716);
+    dbopl3.Setup(49716);    // DBOPL always renders at the chip rate (49716 Hz): the mixer must run at it
+#ifdef BOARD_PICOMEM
+    static_assert(PM_AUDIO_FREQUENCY == 49716, "The OPL output is not resampled: PM_AUDIO_FREQUENCY must be 49716");
+#endif
 #if !BOARD_PICOMEM
     s_prebuf_head = PREBUF_SIZE;
 #endif    
@@ -94,6 +97,11 @@ unsigned int OPL_Pico_PortRead(opl_port_t port)
 
 void OPL_Pico_WriteRegister(unsigned int reg_num, unsigned int value)
 {
+    // Second register array: as the OPL3 (and DOSBox), written to the first array while the OPL3
+    // mode is off (0x105 bit 0), except 0x105 itself
+    if ((reg_num & 0x100) && !dbopl3.opl3Active && (reg_num != OPL_REG_NEW))
+        reg_num &= 0xFF;
+
     switch (reg_num)
     {
         case OPL_REG_TIMER1:
@@ -133,6 +141,56 @@ void OPL_Pico_WriteRegister(unsigned int reg_num, unsigned int value)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Analog output stage
+// ---------------------------------------------------------------------------
+// The chip's output is clipped to 16 bit, the DAC (YAC512 / YM3014B) holds each sample (sinc
+// droop, -2.4 dB at 20 kHz) and the card filters it with an RC low-pass, then a coupling
+// capacitor removes the DC (the half-sine waveforms have some).
+// At 49716 Hz: 1 pole + 1 zero fitted to RC x sample-hold (within 0.31 dB, 0.2 to 22 kHz) and a
+// 3.9 Hz DC blocker. Integer only (also for the RP2040), 3 multiplies per sample and channel.
+// OPL_FILTER: 0 none (Sound Blaster 16), 1 Sound Blaster 1.x / 2.0 (RC 12 kHz), 2 Sound Blaster
+// Pro (RC 8 kHz). RC cutoffs measured on real cards by DOSBox Staging (opl_filter).
+#ifndef OPL_FILTER
+#define OPL_FILTER 1
+#endif
+
+#if OPL_FILTER == 1
+static constexpr int32_t OPL_LPF_G = 19476, OPL_LPF_GB = 6163, OPL_LPF_P = 7128;    // Q15
+#elif OPL_FILTER == 2
+static constexpr int32_t OPL_LPF_G = 15773, OPL_LPF_GB = 5321, OPL_LPF_P = 11674;   // Q15
+#endif
+
+typedef struct {
+    int32_t x1;     // Previous input (clipped chip output)
+    int32_t dc;     // DC blocker state, Q8
+    int32_t lp_x1;  // Low-pass previous input
+    int32_t lp_y1;  // Low-pass previous output
+} opl_analog_t;
+
+static opl_analog_t opl_analog[2];  // Left, Right
+
+static inline int32_t opl_clip16(int32_t v)
+{
+    return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+}
+
+static inline int32_t opl_analog_step(opl_analog_t *a, int32_t chip)
+{
+    int32_t x = opl_clip16(chip);                   // 16 bit chip output (DAC input)
+#if OPL_FILTER
+    a->dc += ((x - a->x1) << 8) - (a->dc >> 11);    // Coupling capacitor: y = x - x1 + (1 - 2^-11) y1
+    a->x1 = x;
+    x = a->dc >> 8;
+    int32_t y = (OPL_LPF_G * x + OPL_LPF_GB * a->lp_x1 + OPL_LPF_P * a->lp_y1 + (1 << 14)) >> 15;
+    a->lp_x1 = x;
+    a->lp_y1 = y;
+    return y;
+#else
+    return x;
+#endif
+}
+
 // Mono interface — kept for compatibility with non-ymfm OPL backends.
 // Returns the average of L+R so mono output is at the same level as stereo.
 void OPL_Pico_simple16(int16_t *buffer, uint32_t nsamples)
@@ -142,17 +200,19 @@ void OPL_Pico_simple16(int16_t *buffer, uint32_t nsamples)
 
     for (uint32_t i = 0; i < nsamples; i++)
     {
-        buffer[i] = b[2*i]+b[2*i+1]>> 1 + 17;
+        buffer[i] = (int16_t) opl_clip16((b[2*i] + b[2*i+1]) >> 1);
     }
 }
 
+// Mixed (added) into the stereo buffer: other devices (MPU) may already be in it
 void OPL_Pico_stereo_int16(int16_t  *buffer, uint32_t nsamples)
 {
     int32_t *b =opl_buf32s;
     dbopl3.GenerateBlock3(nsamples,b);
 
-    for (uint32_t i = 0; i < nsamples*2; i++)
+    for (uint32_t i = 0; i < nsamples*2; i+=2)
     {
-      buffer[i] = (int16_t) (b[i]);
+      buffer[i]   = (int16_t) opl_clip16(buffer[i]   + opl_analog_step(&opl_analog[0], b[i]));
+      buffer[i+1] = (int16_t) opl_clip16(buffer[i+1] + opl_analog_step(&opl_analog[1], b[i+1]));
     }
 }

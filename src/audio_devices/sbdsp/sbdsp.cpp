@@ -15,6 +15,8 @@ XT : Mod Master XT, Prince of Persia, Ghostbusters 2, Tongue of the Fatman, 4D S
 #include <stdio.h>
 #include <string.h>
 #include "pico_pic.h"
+#include "bandlimit/bl_filter.h"
+#include "bandlimit/ts_dac.h"
 
 bool dma_inprogress=false;
 uint32_t PM_DMA_SendTime;
@@ -26,7 +28,12 @@ uint32_t PM_DMA_SendTime;
 #include "../../pm_libs/isa_dma.h"       // ISA/PC DMA code
 #include "../../pm_libs/bus_irq.h"       // ISA/PC IRQ code
 #include "dev_sbdsp.h"
+#include "sbdsp_iolog.h"
 #include "audio_fifo.h"
+#if USE_HWDMA
+#include "../../pm_libs/isa_irq.h"
+#include "../../pm_libs/pm_pccmd.h"
+#endif
 
 #include "sbdsp.h"
 
@@ -154,12 +161,60 @@ static PIC_TimerEvent DSP_DMA_Event = {
 };
 static void sbdsp_adpcm_decode_byte(uint8_t raw);
 
-/*
-static uint32_t DSP_DAC_Timer_EventHandler(Bitu val);
-static PIC_TimerEvent DSP_DAC_Timer_Event = {
-    .handler = DSP_DAC_Timer_EventHandler,
-};
-*/
+// Direct DAC (command 0x10) : games write each sample with the CPU, polling the DSP status
+// (no IRQ, no DMA), at their own rate. Time stamped and band-limited to the measured rate (ts_dac.h)
+static ts_dac_t sbdsp_dac;
+
+// SB16 style band-limited output of the DMA samples (bl_filter.h)
+static bl_state_t sbdsp_bl;
+
+#if USE_HWDMA
+// DSP command E2 answers with a DMA transfer to the memory. Creative's CT-VOICE.DRV (also embedded in
+// X-Wing ROLAND_W.IMS/ADLIB_W.IMS...) points the DMA to its jump table and sends 2 E2 commands: the bytes
+// unscramble the playback code, without them the game freezes at the first digitized sound.
+// The board only sees the DMA cycles of the memory reads (DACK+IOW), and the PCI chipsets don't send the
+// 8237 registers writes to the ISA bus, so the PC writes the answers: E2 raises the PicoMEM IRQ in PC
+// command mode (the program waits in the BIOS), the main loop reads the channel current address and count,
+// writes the bytes there and sets the registers as after a real transfer.
+#define SBDSP_E2_QSIZE 8
+static volatile uint8_t sbdsp_e2_q[SBDSP_E2_QSIZE];
+static volatile uint32_t sbdsp_e2_head, sbdsp_e2_tail;  // Written by core 1 (I/O) / core 0 (main loop)
+
+// E2 command (core 1): queue the answer and ask the PC to enter the PC command mode
+static void sbdsp_e2_queue(uint8_t value) {
+    if ((sbdsp.dma8!=1) && (sbdsp.dma8!=3)) return;  // The BIOS reads the channels 1 and 3 only
+    // Needs the PicoMEM IRQ, on its own line: on the SB one, the program handler would take it as the SB IRQ
+    if ((BV_IRQ==0) || (BV_IRQ==sbdsp.irq)) {
+        IOLOG(IOLOG_E2,0xFFFF,BV_IRQ);       // Answer not written
+        return;
+       }
+    uint32_t h=sbdsp_e2_head;
+    if (h-sbdsp_e2_tail>=SBDSP_E2_QSIZE) return;
+    sbdsp_e2_q[h%SBDSP_E2_QSIZE]=value;
+    sbdsp_e2_head=h+1;
+    isa_pm_irq_raise(IRQ_R_PCCMD,1,false);
+}
+
+// Main loop: once the BIOS waits for a command in the PicoMEM IRQ, write the queued answers
+static void sbdsp_e2_send(void) {
+    if (sbdsp_e2_tail==sbdsp_e2_head) return;
+    if (!(SVAR_IRQ->ISR & (1<<IRQ_R_PCCMD)) || (PCCR_PCSTATE!=PCC_PCS_WAITCMD)) return;
+    uint8_t page;
+    uint16_t offset, count;
+    PC_GetDMARegs(sbdsp.dma8,&page,&offset,&count);   // Current address and count
+    uint32_t t=sbdsp_e2_tail;
+    uint16_t n=0;
+    while (t+n!=sbdsp_e2_head) {
+        uint8_t value=sbdsp_e2_q[(t+n)%SBDSP_E2_QSIZE];
+        PC_MW8(((uint32_t) page<<16)+(uint16_t) (offset+n),value);   // The address increments inside the 64KB page
+        IOLOG(IOLOG_E2,(uint16_t) (offset+n),value);
+        n++;
+       }
+    sbdsp_e2_tail=t+n;
+    PC_SetDMARegs(sbdsp.dma8,(uint16_t) (offset+n),(uint16_t) (count-n),0);
+    PC_End();
+}
+#endif
 
 static __force_inline void sbdsp_dma_disable() {
     sbdsp.mode=MODE_NONE;
@@ -183,35 +238,6 @@ static __force_inline void sbdsp_dma_enable() {
     } else { PM_INFO("SB> DMA Already Enabled"); }
 }
 
-/*
-static __force_inline bool sbdsp_dac_enable() {
-    if (sbdsp.mode==MODE_NONE)  // Start DAC if only in MODE_NONE
-      {
-        //afifo_reset8(&sbdsp_fifo); // Reset the FIFO
-        //Set the sb dsp output rate to 31KHz
-        sbdsp.dac_interval = 32;    //Simulate a DAC at 31250 Hz max
-        sbdsp.sample_step  = (31250 * 65536ul) / PM_AUDIO_FREQUENCY; // Step for the Audio rate convertion
-        sbdsp.increment    = 0;
-        sbdsp.readsample   = true;
-        sbdsp.prev_sample8u = 0x80;
-
-        PIC_AddEvent(&DSP_DAC_Timer_Event, sbdsp.dac_interval, 0);
-        sbdsp.mode=MODE_DAC;
-        return true;
-      }
-
-    PM_INFO("SB> Cant start DAC");
-    return false;
-}
-
-static __force_inline void sbdsp_dac_disable() {
-    if (sbdsp.mode==MODE_DAC)
-      {
-        sbdsp.dac_interval=0;    //Stop the DAC timer if running
-        PIC_RemoveEvent(&DSP_DAC_Timer_Event);
-      }
-}
-*/
 
 static uint32_t __not_in_flash_func(DSP_DMA_EventHandler)(Bitu val) {
     uint32_t current_interval;
@@ -286,14 +312,6 @@ static void __not_in_flash_func(sbdsp_dma_isr)(void) {
       else dma_inprogress=false;
 }
 
-static uint32_t __not_in_flash_func(DSP_DAC_EventHandler)(Bitu val) {
-  if (sbdsp.mode==MODE_DAC)
-     {
-       afifo_add_sample8(&sbdsp_fifo, sbdsp.cur_sample8);
-     }
-  return sbdsp.dac_interval;
-}
-
 // Send an IRQ after some time, for "Tinny" DMA transfer simulation
 static uint32_t DSP_DMA_IRQ_EventHandler(Bitu val) {
   DBG_ON_IRQ_SB();
@@ -306,7 +324,7 @@ static PIC_TimerEvent DSP_DMA_IRQ_Event = {
     .handler = DSP_DMA_IRQ_EventHandler,
 };
 
-// Used by the DAC PAUSE command pending status is reflected in the DSP status port read
+// End of the DAC PAUSE (80h silence): the DSP generates an interrupt
 static uint32_t DSP_DAC_Resume_eventHandler(Bitu val) {
   bus_irq_raise(IRQ_R_AUDIO,sbdsp.irq,true);
   //sbdsp.mainloop_action=DSP_MLC_SENDIRQ;
@@ -343,6 +361,9 @@ void sbdsp_init()
 
 
     afifo_init8(&sbdsp_fifo); // initialize the audio FIFO
+    bl_init();                // SB16 style output filter
+    bl_reset(&sbdsp_bl);
+    ts_dac_init(&sbdsp_dac);  // Direct DAC
 
 #ifdef BOARD_PICOMEM
     PM_INFO("sbdsp_init\n");
@@ -368,6 +389,7 @@ static __force_inline uint8_t sbdsp_codes_per_byte(uint8_t out_mode) {
 
 void sbdsp_start_pcm_dma(bool autoinit, uint16_t xfer_size, uint8_t out_mode) {
     PM_INFO("DMA %d,%d,%d",autoinit,xfer_size,out_mode);
+    IOLOG(IOLOG_DSP,xfer_size,out_mode|(autoinit ? 0x80 : 0));
      sbdsp.dav_dsp=0;
      sbdsp.autoinit=autoinit;
      sbdsp.dma_mode = out_mode;
@@ -631,12 +653,16 @@ void sbdsp_process(void) {
                     sbdsp.current_command = 0;
                     sbdsp.ident_e2[0] += sbdsp.inbox ^ sbdsp.ident_e2[1];
                     sbdsp.ident_e2[1] = (sbdsp.ident_e2[1] >> 2) | (sbdsp.ident_e2[1] << 6);
-                    // ideally it should output this byte via DMA, but we don't support DMA IORs yet
-                    // so stuff to outbox for now
+                    // The answer is a DMA transfer (written by the PC with the HW DMA, see sbdsp_e2_queue)
+                    // Also in the outbox, for the programs that read it there
+#if USE_HWDMA
+                    sbdsp_e2_queue(sbdsp.ident_e2[0]);
+#endif
                     sbdsp_output(sbdsp.ident_e2[0]);
                 }
                 sbdsp.current_command_index++;
             }
+            break;
         case DSP_ENABLE_SPEAKER:
             PM_INFO("ENABLE SPEAKER\n");
             sbdsp.speaker_on = true;
@@ -658,6 +684,7 @@ void sbdsp_process(void) {
             if(sbdsp.dav_dsp) {
                 if(sbdsp.current_command_index==1) {
                     sbdsp.cur_sample8=sbdsp.inbox;
+                    ts_dac_write(&sbdsp_dac, sbdsp.inbox);
                     sbdsp.dav_dsp=0;
                     sbdsp.current_command=0;
                 }
@@ -864,7 +891,18 @@ uint8_t sbdsp_read(uint8_t address)
 //            PM_INFO("iAck");
         return sbdsp.dav_pc << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
       case DSP_WRITE_STATUS:  // 0x0C : Return bit7=0 if the DSP is ready to receive Command/Data
-        return (sbdsp.dav_dsp | sbdsp.dsp_busy | sbdsp.dac_resume_pending) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
+        {
+        // A real DSP flips its busy bit all the time, and some drivers wait for it: CT-VOICE.DRV
+        // (X-Wing) waits for busy then ready before writing D0 (stop / pause voice), up to 65535
+        // reads (130 ms with the interrupts disabled, from the game timer interrupt) if the bit
+        // never goes up. Busy 8 reads out of 16, as in DOSBox: a driver waiting for ready gets it
+        // within 8 reads.
+        // Not busy during the 80h silence (dac_resume_pending): the DSP keeps taking commands, as
+        // in DOSBox (CT-VOICE.DRV also waits for ready with no timeout).
+        static uint8_t write_status_reads;
+        write_status_reads++;
+        return (sbdsp.dav_dsp | sbdsp.dsp_busy | ((write_status_reads & 8) != 0)) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
+        }
       default:
 //            PM_INFO("SB READ: %x\n\r",address);
             return 0xFF;
@@ -1053,6 +1091,8 @@ void sbdsp_dma_worker()
         // dma_inprogress=false;
         }
 
+    sbdsp_e2_send();   // E2 command answers to write in the PC memory
+
 #else
 
 #if DBG_PIN_AUDIO
@@ -1098,41 +1138,11 @@ if (sbdsp.mainloop_action==DSP_MLC_SENDIRQ) {  // Perform the reset here, to not
 // return an audio buffer by reading from the audio fifo
 void sbdsp_updatebuffer(int16_t* buff,uint32_t samples)
 {
-  int8_t   res8u;
-  uint16_t prev_increment;
-  int16_t  fres;
-  res8u=sbdsp.prev_sample8u;
-  /*
- if (sbdsp.mainloop_action==DSP_MLC_SET_TIME_CST)
-    {
+  // Direct DAC : only a compare when it is not used
+  if (ts_dac_pending(&sbdsp_dac)) ts_dac_render(&sbdsp_dac, buff, samples);
 
-    }
-*/
-
-//  PM_INFO("SB_GetBuffer\n");
- if (sbdsp.dma_stereo)
-  {
-  }
-    else
-  {
-    for (uint32_t sn=0;sn<samples*2;sn+=2)  // Stereo, so 2x more data than "samples"
-      {
-       // 8Bit Not signed
-        if (sbdsp.readsample)
-             if (!afifo_take_sample8(&sbdsp_fifo, &res8u))
-              {
-                 sbdsp.prev_sample8u=0x80;  // If the FIFO is empty, return silence
-                return;
-              }
-        fres=(int16_t) ((res8u<<8)+0x8000)/4;  // Convert to 16Bit signed
-        prev_increment=sbdsp.increment;
-        sbdsp.increment+=sbdsp.sample_step;    // Adjust the DMA buffer to the Output frequency
-        sbdsp.readsample = (sbdsp.increment<=prev_increment) ? true : false;
-
-        buff[sn]   += fres;
-        buff[sn+1] += fres;
-      }
-    sbdsp.prev_sample8u=res8u;  // Save the last Sample for the next time
+  if (sbdsp.dma_stereo)
+   {
    }
-
-}
+    else bl_render_fifo8(&sbdsp_bl, &sbdsp_fifo, sbdsp.sample_rate ? sbdsp.sample_rate : 22050, buff, samples);   // 8 bit mono
+   }

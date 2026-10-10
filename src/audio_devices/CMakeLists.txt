@@ -14,7 +14,10 @@ target_sources(audio_devices INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/square/square.cpp
     ${CMAKE_CURRENT_LIST_DIR}/emu2149/emu2149.c
     ${CMAKE_CURRENT_LIST_DIR}/sbdsp/sbdsp.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/sbdsp/sbdsp_iolog.c
     ${CMAKE_CURRENT_LIST_DIR}/covox/covox_dac.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/bandlimit/bl_filter.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/bandlimit/ts_dac.cpp
     ${CMAKE_CURRENT_LIST_DIR}/gus/gus-x.cpp
     ${CMAKE_CURRENT_LIST_DIR}/volctrl.cpp    
 )

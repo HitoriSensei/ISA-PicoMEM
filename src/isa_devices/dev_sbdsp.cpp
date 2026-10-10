@@ -30,6 +30,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #include "opl.h"
 #include "sbdsp/sbdsp.h"
 #include "dev_sbdsp.h"
+#include "sbdsp/sbdsp_iolog.h"
 
 extern bool sbdsp_write(uint8_t address, uint8_t value);
 extern uint8_t sbdsp_read(uint8_t address);
@@ -92,6 +93,7 @@ void dev_sbdsp_remove()
 {
  if (dev_sbdsp_active)       // Don't stop if not active
   {
+   dev_sbopl_remove();       // Its FM ports go with it
    dev_sbdsp_active=false;
    dev_sbdsp_disable_mix();
    PM_INFO("Remove SB (%x)\n",dev_sbdsp_baseport);
@@ -114,12 +116,16 @@ void dev_sbdsp_update()
 
 bool dev_sbdsp_ior(uint32_t Port,uint8_t *Data )
 {
+  // SB FM ports disabled (/sbopl 0): the OPL status is not answered, the bus is left to an
+  // other FM card (or to a port trapping TSR redirecting it to 388h)
+  if (((Port&0x0F)==8) && !dev_sbopl_active) return false;
   dev_sbdsp_enable_mix();
   dev_sbdsp_delay=0;
   if ((Port&0x0F)==8) // Adlib part of SB Status
    {
     *Data = (uint8_t) OPL_Pico_PortRead(OPL_REGISTER_PORT); 
   //  printf("OPLR %x-",*Data);
+    IOLOG(IOLOG_R,dev_sbdsp_baseport|(Port&0x0F),*Data);
     return true;
    } 
    else
@@ -127,6 +133,7 @@ bool dev_sbdsp_ior(uint32_t Port,uint8_t *Data )
     sbdsp_process();
     *Data=sbdsp_read((uint8_t) Port&0x0F);        
      sbdsp_process();
+     IOLOG(IOLOG_R,dev_sbdsp_baseport|(Port&0x0F),*Data);
  //    PM_INFO("SBR %x>%x",Port,Data);
      return true;
    }
@@ -136,14 +143,15 @@ void dev_sbdsp_iow(uint32_t Port,uint8_t Data)
 {
   //   PM_INFO("SBW %x>%x",Port,Data);
   static uint16_t sbopl_addr;
+  IOLOG(IOLOG_W,dev_sbdsp_baseport|(Port&0x0F),Data);
   sbdsp_process();
   dev_sbdsp_enable_mix();
   dev_sbdsp_delay=0;
   
   if (sbdsp_write((uint8_t) Port&0x0F, Data))
      sbdsp_process();  // Doesn't process if nothing written
-    else  // If not SB, May be adlib
-      switch (Port&0x0F) 
+    else if (dev_sbopl_active)  // If not SB, May be adlib (ignored when the SB FM ports are disabled: /sbopl 0)
+      switch (Port&0x0F)
    {
    case 0x08:
      sbopl_addr = Data;

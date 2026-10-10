@@ -52,6 +52,10 @@ Try : https://github.com/Xilinx/qemu/blob/master/hw/net/ne2000.c
 
 #include "../pm_libs/bus_irq.h"       // ISA/PC IRQ code
 
+#if PM_HTTP
+#include "../httpd/pm_netif.h"          // lwIP network interface (HTTP server)
+#endif
+
 //#include "pm_defines.h"
 
 // Picomem defines
@@ -261,10 +265,12 @@ for (;;)
 #define NOLWIP
 
 #ifdef NOLWIP
-// never called but linker needs it when lwip is removed
+#if !PM_HTTP
+// never called but linker needs it when lwip is removed (Provided by lwIP when the HTTP server is used)
 uint16_t pbuf_copy_partial (void *buf, void *dataptr, uint16_t len, uint16_t offset)
 {
 }
+#endif
 
 void cyw43_cb_tcpip_set_link_up(cyw43_t *self, int itf) {
 #if PM_PRINTF        
@@ -339,6 +345,9 @@ void _cyw43_cb_process_ethernet(void *cb_data, int itf, size_t len, const uint8_
 
 void cyw43_cb_process_ethernet(void *cb_data, int itf, size_t len, const uint8_t *buf) 
 {                                        
+#if PM_HTTP
+  if (pm_netif_rx(buf, len)) return;   // Frame for the HTTP server (lwIP), not for the NE2000
+#endif
   ne2000_rx_frame(nic, buf, len);             
   CYW43_STAT_INC(PACKET_IN_COUNT);       
 }

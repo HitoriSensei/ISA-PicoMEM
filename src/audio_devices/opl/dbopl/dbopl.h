@@ -30,10 +30,17 @@ typedef int32_t Bits;
 #define WAVE_TABLEMUL	12
 
 //Select the type of wave generator routine
-#define DBOPL_WAVE WAVE_TABLEMUL
+//WAVE_TABLELOG does the real chip's log-sine + exponential table arithmetic: same output
+//levels as the YMF262 (TABLEMUL: linear sine * linear volume, close but not exact). ~40 % more
+//DBOPL time (measured on a PC): build with DBOPL_WAVE=12 (TABLEMUL) if the CPU is short.
+#ifndef DBOPL_WAVE
+#define DBOPL_WAVE WAVE_TABLELOG
+#endif
 
 //#define DBOPL_DUMP_TABLES
-#define DBOPL_USE_PRECALCUALTED_TABLES
+#if ( DBOPL_WAVE == WAVE_TABLEMUL )
+#define DBOPL_USE_PRECALCUALTED_TABLES	//tables.ipp only has the TABLEMUL tables (others: InitTables)
+#endif
 
 namespace DBOPL {
 
@@ -103,7 +110,8 @@ public:
 
 	uint32_t chanData;			//Frequency/octave and derived data coming from whatever channel controls this
 	uint32_t freqMul;				//Scale channel frequency with this, TODO maybe remove?
-	uint32_t vibrato;				//Scaled up vibrato strength
+	uint32_t vibrato[3];			//Scaled up vibrato offset: f-number offset (fnum >> 7) >> 0, 1, 2
+								//The chip shifts the integer offset (was the scaled value)
 	int32_t sustainLevel;		//When stopping at sustain level stop here
 	int32_t totalLevel;			//totalLevel is added to every generated volume
 	uint32_t currentLevel;		//totalLevel + tremolo
@@ -145,8 +153,8 @@ public:
 	bool Silent() const;
 	void Prepare( const Chip* chip );
 
-	void KeyOn( uint8_t mask);
-	void KeyOff( uint8_t mask);
+	void KeyOn( const Chip* chip, uint8_t mask);
+	void KeyOff( const Chip* chip, uint8_t mask);
 
 	template< State state>
 	Bits TemplateVolume( );
@@ -205,9 +213,14 @@ struct Chip {
 	uint32_t lfoCounter = 0;
 	uint32_t lfoAdd = 0;
 
+	//Samples generated, the chip's envelope clock (one for all the operators)
+	uint32_t egSamples = 0;
+
 	uint32_t noiseCounter = 0;
 	uint32_t noiseAdd = 0;
 	uint32_t noiseValue = 0;
+	//Top cymbal phase bits 3 and 5 of the previous sample (the chip computes the hi-hat first)
+	uint8_t rmTcBit3 = 0, rmTcBit5 = 0;
 
 	//Frequency scales for the different multiplications
     uint32_t freqMul[16] = {};
