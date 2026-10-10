@@ -67,11 +67,19 @@ uint8_t cvx_enable(uint8_t type, uint16_t baseport, uint16_t baseport2)
      afifo_init8s(cvx.fifo_stereo);
      cvx.sampleleft = 0x80;
     } 
+    else if (type==CVX_TYPE_DAC)
+    {  // Written by the CPU at its own rate : time stamped, no FIFO and no timer
+     cvx.dac=(ts_dac_t*) malloc(sizeof(ts_dac_t));
+     if (cvx.dac == NULL) return CMDERR_MEM_ERR;  // Not enaugh memory
+     ts_dac_init(cvx.dac);
+    }
     else
     {
      cvx.fifo=(audio_fifo_8_t*) malloc(sizeof(audio_fifo_8_t));
      if (cvx.fifo == NULL) return CMDERR_MEM_ERR;  // Not enaugh memory
      afifo_init8(cvx.fifo);
+     bl_init();
+     bl_reset(&cvx.bl);
     }
   cvx.sample = 0x80;
   cvx.isleft = true; // Default to left channel for stereo DAC   
@@ -92,7 +100,11 @@ void cvx_disable()
     if (cvx.fifo_stereo != NULL) {
         free(cvx.fifo_stereo);
         cvx.fifo_stereo = NULL;
-       }       
+       }
+    if (cvx.dac != NULL) {
+        free(cvx.dac);
+        cvx.dac = NULL;
+       }
    }
  cvx.type = CVX_TYPE_NONE; // Reset the type
  cvx.dac_interval = 0; // Stop the DAC timer if running
@@ -103,7 +115,8 @@ void cvx_start_dac()
 if (!dac_timer_active) {
 
   switch(cvx.type) {
-    case CVX_TYPE_DAC: // Covox DAC
+    case CVX_TYPE_DAC: // Covox DAC : no timer, the writes are time stamped (ts_dac)
+        break;
     case CVX_TYPE_DAC_STEREO: // Covox DAC Stereo in one  
     case CVX_TYPE_DAC_DUAL:   // Covox DAC Dual (LPT1+LPT2)
         PM_INFO("> Start Covox DAC\n");
@@ -120,7 +133,7 @@ if (!dac_timer_active) {
     case CVX_TYPE_DISNEY: // Disney Sound Source
         dac_timer_active=true;
         //Set the disney Sound Source output rate to 6993 Hz
-        cvx.dac_interval = 143;    //Simulate a DAC at 6993 Hz max
+        cvx.dac_interval = 1000000ul / CVX_DSS_RATE;    //Simulate a DAC at 6993 Hz max
         cvx.sample_step  = (6993 * 65536ul) / PM_AUDIO_FREQUENCY; // Step for the Audio rate convertion
         cvx.increment    = 0;
         cvx.readsample   = true;
@@ -216,6 +229,7 @@ void cvx_outp(uint16_t address, uint8_t data)
     case CVX_TYPE_DAC: // Covox Single DAC
         if ((address&0x03)==0) {
             cvx.sample=data;
+            ts_dac_write(cvx.dac, data);
            }
         break;
     case CVX_TYPE_DAC_STEREO: // Covox DAC Stereo in one
@@ -263,6 +277,17 @@ void cvx_updatebuffer(int16_t* buff,uint32_t samples)
   int8_t   res8ur, res8ul;
   uint16_t prev_increment;
   int16_t  fresr, fresl;
+
+  if (cvx.type==CVX_TYPE_DAC)
+   {  // Band-limited to the rate the CPU writes at (SB16 like)
+    if (cvx.dac && ts_dac_pending(cvx.dac)) ts_dac_render(cvx.dac, buff, samples);
+    return;
+   }
+  if (cvx.type==CVX_TYPE_DISNEY)
+   {  // Band-limited to the Disney Sound Source rate (SB16 like)
+    bl_render_fifo8(&cvx.bl, cvx.fifo, CVX_DSS_RATE, buff, samples);
+    return;
+   }
 
   if (cvx.type==CVX_TYPE_DAC_DUAL)
    {  // Get Stereo data

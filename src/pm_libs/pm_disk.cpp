@@ -883,6 +883,56 @@ void PM_ResetConfig()
  memset((void *) &PM_DP_RAM[CONF_OFFS],0,CONF_SIZE);
 }
 
+#if USE_HWIRQ
+// IRQ asked in config.txt for the PicoMEM itself: applied at the end of the BIOS IRQ detection
+// (CMD_IRQAck in pm_cmd.cpp), so that the detection still finds all the IRQ jumpers
+uint8_t PM_CfgIRQ=0;
+#endif
+
+// Adlib port asked in config.txt (ADLIB <port>), used when the Adlib is On (PM_Config->Adlib).
+// Not in PMCFG_t: its layout is shared with the BIOS (binary only for the PicoMEM 2.0), whose
+// menu only switches PM_Config->Adlib On / Off
+uint16_t PM_CfgAdlibPort=0x388;
+
+#if USE_SBDSP
+// Sound Blaster started at boot (config.txt SB / SBOPL, PM_Audio_OnOff in pm_cmd.cpp). Firmware
+// only, as the Adlib port
+uint16_t PM_CfgSBPort=0;       // 0: Off
+uint8_t  PM_CfgSBIRQ=5;
+uint8_t  PM_CfgSBDMA=1;
+bool     PM_CfgSBOPL=true;     // SB FM ports (base+8/+9)
+#endif
+
+// MPU-401 / General MIDI started at boot (config.txt MPU), firmware only. CFG_PORT_UNSET: not in
+// config.txt, the MPU is left as it is at reboot
+uint16_t PM_CfgMPUPort=CFG_PORT_UNSET;
+
+// Covox / Disney Sound Source started at boot (config.txt CVX / DSS, same device: the last one
+// wins), firmware only. CFG_PORT_UNSET: not in config.txt, left as it is at reboot
+uint16_t PM_CfgCVXPort=CFG_PORT_UNSET;
+bool     PM_CfgCVXDisney=false;     // false: Covox DAC, true: Disney Sound Source
+
+#if USE_GUS
+// Gravis UltraSound started at boot (config.txt GUS), firmware only
+uint16_t PM_CfgGUSPort=0;      // 0: Off
+uint8_t  PM_CfgGUSIRQ=5;
+uint8_t  PM_CfgGUSDMA=1;
+#endif
+
+// Port in a list of valid ports ("Port" config keys)
+static bool cfg_port_in(uint32_t port, const uint16_t *list, int n)
+{
+  for (int i=0;i<n;i++) if (list[i]==port) return true;
+  return false;
+}
+
+// The line starts with the key (the other keys are found anywhere in the line, "SB " is in "USB ")
+static bool cfg_key(const char *line, const char *key)
+{
+  while ((*line==' ')||(*line=='\t')) line++;
+  return strncmp(line,key,strlen(key))==0;
+}
+
 uint8_t pm_LoadConfig()
 {
   char buf[CONFIG_LINE_BUFFER_SIZE];
@@ -927,6 +977,24 @@ f_close(&cfg);
 PM_Config->PREBOOT=false;    // Clear the preboot parameter.
 PM_Config->BIOSBOOT=false;   // Clear the preboot parameter.
 BV_IRQ=0;
+#if USE_HWIRQ
+PM_CfgIRQ=0;
+#endif
+PM_CfgAdlibPort=0x388;
+PM_CfgMPUPort=CFG_PORT_UNSET;
+PM_CfgCVXPort=CFG_PORT_UNSET;
+PM_CfgCVXDisney=false;
+#if USE_GUS
+PM_CfgGUSPort=0;
+PM_CfgGUSIRQ=5;
+PM_CfgGUSDMA=1;
+#endif
+#if USE_SBDSP
+PM_CfgSBPort=0;
+PM_CfgSBIRQ=5;
+PM_CfgSBDMA=1;
+PM_CfgSBOPL=true;
+#endif
 BV_TdyRAM=0;
 BV_Tandy=0;
 
@@ -1012,9 +1080,17 @@ PM_INFO("Read 0:/config.txt\n");
         if (strstr(buf, "IRQ ")) {
            uint32_t res;
            if (read_dec_from_config_line(buf,&res))
-              if ((res==3)||(res==5)||(res==7)) 
+#if BOARD_PM20
+              if ((res==3)||(res==5)||(res==6)||(res==7))   // PicoMEM 2.0 also has an IRQ 6 jumper
+#else
+              if ((res==3)||(res==5)||(res==7))
+#endif
               {
-                BV_IRQ=res;
+#if USE_HWIRQ
+                PM_CfgIRQ=res;   // Multiple IRQ jumpers: the BIOS detection still runs
+#else
+                BV_IRQ=res;      // Single IRQ: the BIOS skips its detection
+#endif
                 PM_INFO("> IRQ %d\n",res);
               }
         }
@@ -1048,10 +1124,137 @@ PM_INFO("Read 0:/config.txt\n");
            uint32_t res;
            if (read_hex_from_config_line(buf,&res))
              {
-              PM_INFO("> ADLIB %d\n",res);
+              PM_INFO("> ADLIB %X\n",res);
               if (res==0)
                     {PM_Config->Adlib=false;}
-               else {PM_Config->Adlib=true;}
+               else if (res==1)
+                    {PM_Config->Adlib=true;}       // 388h
+               else if (!(res & 7) && (res>=0x100) && (res<=0x3F8))
+                    {                              // Port: 8 ports block, 100h to 3F8h
+                     PM_Config->Adlib=true;
+                     PM_CfgAdlibPort=res;
+                    }
+               else PM_WARNING("ADLIB: invalid port %X (0, 1 or 100-3F8, 8 aligned)\n",res);
+             }
+        }
+#if USE_SBDSP
+        if (cfg_key(buf, "SB ")) {      // SB 0 / SB 1 (220 5 1) / SB <port hex> [<irq> [<dma>]]
+           unsigned int port, irq=5, dma=1;
+           if (sscanf(buf, "%*s %x %u %u", &port, &irq, &dma) >= 1)
+             {
+              if (port==1) port=0x220;
+              if (port==0) PM_CfgSBPort=0;
+               else if (((port & 0x0F)==0) && (port>=0x210) && (port<=0x280)
+                        && ((irq==3)||(irq==5)||(irq==7)) && ((dma==1)||(dma==3)))
+                    {
+                     PM_CfgSBPort=port;
+                     PM_CfgSBIRQ=irq;
+                     PM_CfgSBDMA=dma;
+                    }
+               else PM_WARNING("SB: invalid %X %d %d (port 210-280, IRQ 3/5/7, DMA 1/3)\n",port,irq,dma);
+              PM_INFO("> SB %X %d %d\n",PM_CfgSBPort,PM_CfgSBIRQ,PM_CfgSBDMA);
+             }
+        }
+        if (cfg_key(buf, "SBOPL ")) {   // SB FM ports (base+8/+9) with the SB: SBOPL 0 / 1
+           uint32_t res;
+           if (read_dec_from_config_line(buf,&res))
+             {
+              PM_CfgSBOPL=(res!=0);
+              PM_INFO("> SBOPL %d\n",PM_CfgSBOPL);
+             }
+        }
+#endif
+        if (cfg_key(buf, "JOY ")) {     // USB Joystick on the game port: JOY 0 / 1 (BIOS menu setting)
+           uint32_t res;
+           if (read_dec_from_config_line(buf,&res))
+             {
+              PM_Config->EnableJOY=(res!=0);
+              PM_INFO("> JOY %d\n",PM_Config->EnableJOY);
+             }
+        }
+        if (cfg_key(buf, "MPU ")) {     // MPU-401 / General MIDI: MPU 0 / 1 (330h) / port
+           uint32_t res;
+           if (read_hex_from_config_line(buf,&res))
+             {
+              if ((res==0)||(res==1)||(res==0x300)||(res==0x320)||(res==0x330)||(res==0x340)||(res==0x360))
+                {
+                 PM_CfgMPUPort=res;
+                 PM_INFO("> MPU %X\n",res);
+#if !USE_MPU
+                 if (res) PM_WARNING("MPU: not available in this firmware (USE_MPU=0)\n");
+#endif
+                }
+               else PM_WARNING("MPU: invalid port %X (0, 1, 300, 320, 330, 340, 360)\n",res);
+             }
+        }
+        // CMS / Tandy / Mindscape: set the BIOS menu options (as ADLIB), 1 is the default port
+        if (cfg_key(buf, "CMS ")) {     // CMS 0 / 1 (220h) / port
+           static const uint16_t ports[]={0x210,0x220,0x230,0x240,0x250,0x260};
+           uint32_t res;
+           if (read_hex_from_config_line(buf,&res))
+             {
+              if (res==1) res=0x220;
+              if ((res==0)||cfg_port_in(res,ports,6)) { PM_Config->CMSPort=res; PM_INFO("> CMS %X\n",res); }
+                else PM_WARNING("CMS: invalid port %X (0, 1, 210-260)\n",res);
+             }
+        }
+        if (cfg_key(buf, "TDY ")) {     // Tandy sound: TDY 0 / 1 (2C0h) / port ("TANDY" is the Tandy mode)
+           static const uint16_t ports[]={0x0C0,0x1E0,0x2C0,0x300};
+           uint32_t res;
+           if (read_hex_from_config_line(buf,&res))
+             {
+              if (res==1) res=0x2C0;
+              if ((res==0)||cfg_port_in(res,ports,4)) { PM_Config->TDYPort=res; PM_INFO("> TDY %X\n",res); }
+                else PM_WARNING("TDY: invalid port %X (0, 1, C0, 1E0, 2C0, 300)\n",res);
+             }
+        }
+        if (cfg_key(buf, "MMB ")) {     // Mindscape Music Board: MMB 0 / 1 (300h) / port
+           static const uint16_t ports[]={0x220,0x2F0,0x300,0x310,0x320};
+           uint32_t res;
+           if (read_hex_from_config_line(buf,&res))
+             {
+              if (res==1) res=0x300;
+              if ((res==0)||cfg_port_in(res,ports,5)) { PM_Config->MMBPort=res; PM_INFO("> MMB %X\n",res); }
+                else PM_WARNING("MMB: invalid port %X (0, 1, 220, 2F0, 300, 310, 320)\n",res);
+             }
+        }
+        // Covox DAC / Disney Sound Source on a printer port: 0 / 1 (LPT1 378h) / 2 (LPT2 278h) / port
+        if (cfg_key(buf, "CVX ") || cfg_key(buf, "DSS ")) {
+           static const uint16_t ports[]={0x278,0x300,0x378,0x3BC};
+           bool dss=cfg_key(buf, "DSS ");
+           uint32_t res;
+           if (read_hex_from_config_line(buf,&res))
+             {
+              if (res==1) res=0x378;
+              if (res==2) res=0x278;
+              if ((res==0)||cfg_port_in(res,ports,4))
+                {
+                 PM_CfgCVXPort=res;
+                 PM_CfgCVXDisney=dss;
+                 PM_INFO("> %s %X\n",dss ? "DSS" : "CVX",res);
+                }
+                else PM_WARNING("%s: invalid port %X (0, 1, 2, 278, 300, 378, 3BC)\n",dss ? "DSS" : "CVX",res);
+             }
+        }
+        if (cfg_key(buf, "GUS ")) {     // Gravis UltraSound: GUS 0 / GUS <port hex> [<irq> [<dma>]]
+           unsigned int port, irq=5, dma=1;
+           if (sscanf(buf, "%*s %x %u %u", &port, &irq, &dma) >= 1)
+             {
+#if USE_GUS
+              if (port==1) port=0x240;
+              if (port==0) PM_CfgGUSPort=0;
+               else if (((port & 0x0F)==0) && (port>=0x210) && (port<=0x280)
+                        && ((irq==3)||(irq==5)||(irq==7)) && ((dma==1)||(dma==3)))
+                    {
+                     PM_CfgGUSPort=port;
+                     PM_CfgGUSIRQ=irq;
+                     PM_CfgGUSDMA=dma;
+                    }
+               else PM_WARNING("GUS: invalid %X %d %d (port 210-280, IRQ 3/5/7, DMA 1/3)\n",port,irq,dma);
+              PM_INFO("> GUS %X %d %d\n",PM_CfgGUSPort,PM_CfgGUSIRQ,PM_CfgGUSDMA);
+#else
+              if (port) PM_WARNING("GUS: not available in this firmware (USE_GUS=0)\n");
+#endif
              }
         }
         if (strstr(buf, "HDD0 ")) {  // Not implemented

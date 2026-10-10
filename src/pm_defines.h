@@ -71,6 +71,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #define CMDERR_MEM_ERR    0x11  // Not enaugh memory
 #define CMDERR_AMIX_FAIL  0x12  // Audio mixer init fail
 #define CMDERR_NOIRQ	  0x13  // No IRQ detected/Available
+#define CMDERR_BADPORT    0x14  // Invalid port for this device
 #define CMDERR_NOTSUPP    0xFF  // Command not supported
 
 // 0x 1x General / Configuration Commands
@@ -122,7 +123,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #define CMD_AudioOnOff    0x70  // Full audio rendering 0: Off 1:On
 
 #define CMD_PS1OnOff      0x72  // PS1 Audio : 0 : Off 1: On default
-#define CMD_AdlibOnOff    0x73  // Tandy Audio : 0 : Off 1: On default
+#define CMD_AdlibOnOff    0x73  // Adlib Audio : 0 : Off 1: On default (388h) or port, return install status
 #define CMD_TDYOnOff      0x74  // Tandy Audio : 0 : Off 1: On default or port
 #define CMD_CMSOnOff      0x75  // CMS Audio   : 0 : Off 1: On default or port
 #define CMD_CVXOnOff      0x76  // Covox Audio : 0 : Off 1: On default or port
@@ -133,6 +134,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #define CMD_MMBOnOff      0x7B  // Mindscape Audio : 0 : Off 1: On default or port
 #define CMD_DSSOnOff      0x7C  // Disney Audio
 #define CMD_MPUOnOff      0x7D  // MPU/General MIDI : 0 : Off 1: On default or port
+#define CMD_SBOPLOnOff    0x7E  // Sound Blaster FM ports (base+8/+9) : 0 : Off 1: On (SB needed)
 
 
 // 8x Disk Commands
@@ -420,3 +422,5 @@ typedef struct PMCFG_t {
 }PMCFG_t; 
 
 extern PMCFG_t *PM_Config;             // Pointer to the PicoMEM Configuration in the BIOS Shared Memory
+
+#define CFG_PORT_UNSET 0xFFFF           // PM_CfgMPUPort / PM_CfgCVXPort: no line in config.txt

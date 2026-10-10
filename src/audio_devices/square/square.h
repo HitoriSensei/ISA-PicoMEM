@@ -40,12 +40,12 @@
 #pragma once
 
 #include <stdint.h>
+#include "pm_audio.h"
 
 #ifndef ASG_AUDIO_SQUARE_H
 #define ASG_AUDIO_SQUARE_H
 
-//static constexpr uint32_t OUTPUT_FREQUENCY = 44100; 
-static constexpr uint32_t OUTPUT_FREQUENCY = 49716;
+static constexpr uint32_t OUTPUT_FREQUENCY = PM_AUDIO_FREQUENCY;   // The mixer rate
 
 //===========================================================================
 //

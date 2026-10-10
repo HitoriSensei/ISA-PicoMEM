@@ -70,13 +70,14 @@ void usage()
 //    fprintf(stderr, "    /?       - Show this message\n");
     fprintf(stderr, "    /k       - Reinstall the Key Shortcut interrupt\n");
     fprintf(stderr, "    /j x     - Joystick          (0:Off 1:On)\n");
-    fprintf(stderr, "    /adlib x - Adlib sound       (0:Off 1:On)\n"); 
+    fprintf(stderr, "    /adlib x - Adlib sound       (0:Off 1:On) 388 or BLASTER Fxxx, /sb 1 too\n"); 
     fprintf(stderr, "    /cms x   - CMS sound         (0:Off 1:220 or 210,230,240,250)\n"); 
     fprintf(stderr, "    /tdy x   - Tandy sound       (0:Off 1:2C0 or C0,1E0,300)\n");
     fprintf(stderr, "    /cvx x   - Covox DAC sound   (0:Off 1:LPT1 2:LPT2 or 300)\n");
 //    fprintf(stderr, "    /ste x   - Stereo in One     (0:Off 1:LPT1 2:LPT2)\n");
     fprintf(stderr, "    /mmb x   - Mindscape sound   (0:Off 1:300 or 220,2F0,310,320)\n");
     fprintf(stderr, "    /sb x    - Sound Blaster     (0:Off 1:On) use the BLASTER values\n");
+    fprintf(stderr, "    /sbopl x - SB FM, base+8/+9  (0:Off 1:On) /sb 1 enables it\n");
 #if PICOMEM2
     fprintf(stderr, "    /gus x   - Gravis UltraSound (0:Off 1:On) use the ULTRSND values\n");
     fprintf(stderr, "    /mpu x   - General MIDI font (0:Off 1:330 or 300,320,340,360)\n");
@@ -147,6 +148,8 @@ void display_error(uint8_t err)
                 break;
       case CMDERR_AMIX_FAIL: printf(" Failed to initialize the mixer\n");
                 break;
+      case CMDERR_BADPORT: printf(" Invalid port\n");
+                break;
       case CMDERR_NOIRQ: printf(" No IRQ detected/Available\n");
                 break;
       default:   printf(" Code %d\n",err); break;
@@ -169,6 +172,18 @@ e = sscanf(argv[++i], "%hx", &option); \
 if (e != 1 || option > 0x3ffu) { \
     usage();  \
     return 4; \
+}
+
+// Adlib port: BLASTER Fxxx (hex, anywhere in the variable), 388h without it
+static uint16_t blaster_fm_port(void) {
+    char *p = getenv("BLASTER");
+    uint16_t port;
+    while (p && *p) {
+        if (((*p == 'F') || (*p == 'f')) && (sscanf(p + 1, "%hx", &port) == 1)) return port;
+        while (*p && (*p != ' ')) p++;      // Next token
+        while (*p == ' ') p++;
+    }
+    return 0x388;
 }
 
 static int configure_sb(void) {
@@ -208,7 +223,7 @@ static int configure_sb(void) {
         display_error(e);
         return 6;
        }
-    printf(" - Sound Blaster enabled on port %x IRQ %d DMA %d\n", sbconf.port, sbconf.irq, sbconf.dma);
+    printf(" - Sound Blaster enabled on port %x IRQ %d DMA %d, FM on %x and %x\n", sbconf.port, sbconf.irq, sbconf.dma, sbconf.port + 8, blaster_fm_port());
     return 0;
 }
 
@@ -280,6 +295,9 @@ int main(int argc, char* argv[]) {
 // Read the arguments
     uint16_t tmp_uint16;
     uint8_t tmp_uint8;
+    int adlib_opt = -1;     // /adlib and /sbopl are applied after the other options:
+    int sbopl_opt = -1;     // /sb 1 enables them, they can disable them in any order
+    bool sb_on = false;     // /sb 1 done: the Adlib is moved to the BLASTER Fxxx port
     int i = 1;
     while (i < argc) 
      {
@@ -321,14 +339,12 @@ int main(int argc, char* argv[]) {
                 return 255;
             }
             process_port_opt(tmp_uint16);
-            printf(" - Adlib : ");
-            if ((tmp_uint16==0)||(tmp_uint16==1))
-               {
-                if (tmp_uint16==0) printf("Disable\n");
-                  else printf("Enable (388)\n");
-
-                pm_io_cmd(CMD_AdlibOnOff,tmp_uint16);
-               } else printf("Use only 0 or 1\n");                           
+            if ((tmp_uint16==0)||(tmp_uint16==1)) adlib_opt=tmp_uint16;
+               else printf(" - Adlib : Use only 0 or 1\n");
+        } else if (stricmp(argv[i], "/sbopl") == 0) { // Sound Blaster FM ports
+            process_port_opt(tmp_uint16);
+            if ((tmp_uint16==0)||(tmp_uint16==1)) sbopl_opt=tmp_uint16;
+               else printf(" - Sound Blaster FM : Use only 0 or 1\n");
         } else if (stricmp(argv[i], "/j") == 0) {    // Joystick
             if (i + 1 >= argc) {
                 usage();
@@ -547,7 +563,7 @@ int main(int argc, char* argv[]) {
                    }
                   else 
                    {
-                    configure_sb();
+                    if (configure_sb() == 0) sb_on = true;
                    }                      
         }
          else if (stricmp(argv[i], "/gus") == 0) {    // Gravis UltraSound
@@ -568,6 +584,31 @@ int main(int argc, char* argv[]) {
         }        
         ++i;
      }
+
+    if (adlib_opt == 0) {
+        printf(" - Adlib : Disable\n");
+        pm_io_cmd(CMD_AdlibOnOff,0);
+    } else if ((adlib_opt == 1) || sb_on) {     // Explicit, or enabled by /sb 1 (on its last port)
+        tmp_uint16 = blaster_fm_port();
+        tmp_uint8 = pm_io_cmd(CMD_AdlibOnOff,tmp_uint16);
+        if (tmp_uint8) {
+            printf(" - Adlib (%X) Enable Error:",tmp_uint16);
+            display_error(tmp_uint8);
+            return 1;
+        }
+        if (adlib_opt == 1) printf(" - Adlib : Enable (%X)\n",tmp_uint16);
+    }
+    if (sbopl_opt >= 0) {
+        printf(" - Sound Blaster FM (base+8/+9) : ");
+        tmp_uint8=pm_io_cmd(CMD_SBOPLOnOff,sbopl_opt);
+        if (tmp_uint8) {
+            printf("Error, Sound Blaster enabled ? ");
+            display_error(tmp_uint8);
+            return 1;
+        }
+        if (sbopl_opt==0) printf("Disable\n");
+          else printf("Enable\n");
+    }
 //    printf("PicoMEM Init End.\n");
     return 0;
 }

@@ -4,8 +4,9 @@
 
 #include "../../../pm_debug.h"
 
-#define PM_AUDIO_FREQUENCY 49716   // Adlib output frequency
-//#define PM_AUDIO_FREQUENCY 44100
+// Output rate: the OPL chip rate (14.31818 MHz / 288). The OPL (DBOPL), CMS / Tandy and MIDI render
+// at it natively, the sampled sources (SB, Covox, GUS) are resampled to it (band-limited filter)
+#define PM_AUDIO_FREQUENCY 49716
 #define PM_SAMPLES_PER_BUFFER 64
 #define PM_AUDIO_BUFFERS  5
 #define PM_SAMPLES_STRIDE 4        // (Nb of byte per sample 16Bit X 2)

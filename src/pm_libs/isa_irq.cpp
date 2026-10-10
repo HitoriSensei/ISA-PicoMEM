@@ -5,6 +5,7 @@
 #include "pm_defines.h"
 #include "../pm_gvars.h"
 #include "isa_irq.h"
+#include "sbdsp/sbdsp_iolog.h"
 #include "pm_board.h"
 
 // Manage the Interrupt generation to the PC:
@@ -40,6 +41,25 @@ bool IRQ_raise_inprogress=false;
 bool IRQ_Crit_initialized=false;
 volatile uint64_t PM_IRQ_AckTime;
 volatile uint64_t PM_IRQ_SendTime;
+
+// Pin of the PicoMEM IRQ. With multiple IRQ lines (USE_HWIRQ), it is the line of the IRQ chosen by the BIOS
+// (BV_IRQ, where it installed its handler), PIN_PM_IRQ is the IRQ7 pin.
+static __force_inline uint pm_irq_pin()
+{
+#if USE_HWIRQ
+ switch (BV_IRQ)
+  {
+   case 3: return PIN_IRQ3;
+   case 5: return PIN_IRQ5;
+#ifdef PIN_IRQ6
+   case 6: return PIN_IRQ6;
+#endif
+   default: return PIN_PM_IRQ;
+  }
+#else
+ return PIN_PM_IRQ;
+#endif
+}
 
 // Lower all the IRQ and reset the variables
 void isa_irq_init()
@@ -93,11 +113,11 @@ void __not_in_flash_func(isa_pm_irq_raise)(uint8_t Source,uint8_t irqnb,bool For
      critical_section_enter_blocking(&pm_irq_crit);
      if (PM_IRQ_raised)
       {
-       gpio_put(PIN_PM_IRQ,1);     // If already UP, need to go down and wait
+       gpio_put(pm_irq_pin(),1);     // If already UP, need to go down and wait
        busy_wait_us(5);
       }
      SVAR_IRQ->PM_IRR=1;
-     gpio_put(PIN_PM_IRQ,0); // There is an inverter, 0 is Up
+     gpio_put(pm_irq_pin(),0); // There is an inverter, 0 is Up
      PM_IRQ_SendTime=time_us_64();
      PM_IRQ_raised=true;
      critical_section_exit(&pm_irq_crit);
@@ -120,7 +140,7 @@ void __not_in_flash_func(isa_pm_irq_ack)()
   {
     // PicoMEM IRQ Down without Lock
     PM_IRQ_raised=false;
-    gpio_put(PIN_PM_IRQ,1); // There is an inverter, 0 is Up 
+    gpio_put(pm_irq_pin(),1); // There is an inverter, 0 is Up 
     // Put IRQ Register to 0
     PM_IRQ_AckTime=time_us_64();  
   }
@@ -158,6 +178,7 @@ void __not_in_flash_func(isa_irq_raise)(uint8_t Source,uint8_t irqnb, bool Force
              break;
      default: break;
     }
+ if (Source==IRQ_R_AUDIO) IOLOG(IOLOG_IRQ,IRQpin!=0,irqnb);
  if (!IRQpin) { // Not hardware IRQ, use the PicoMEM IRQ instead
         isa_pm_irq_raise(Source,irqnb,false);
         return;
