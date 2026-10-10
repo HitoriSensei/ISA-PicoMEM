@@ -58,6 +58,13 @@ set(PICOMEM_BOARD "PICOMEM_20")
 
  set(FAST_RAM 0)   # 1 to enable the Fast RAM Mode (No PSRAM based memory)
 
+# PicoMEM 2.0 firmware variants, can be overridden from the command line (cmake -DPM_USE_GUS=0 ...)
+set(PM_USE_GUS 1 CACHE STRING "PicoMEM 2.0: Gravis UltraSound emulation (0/1)")
+set(PM_USE_MPU 1 CACHE STRING "PicoMEM 2.0: MPU-401 General MIDI emulation (0/1)")
+set(PM_SBDSP_IOLOG 0 CACHE STRING "PicoMEM 2.0: log the Sound Blaster I/O to sbiolog.txt on the SD card (0/1)")
+# -save-temps keeps the .i/.s files next to the objects, but it disables ccache (set to OFF for the CI builds)
+option(PM_SAVE_TEMPS "Keep the preprocessed and assembly files (-save-temps -fverbose-asm)" ON)
+
 #set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_BUILD_TYPE "Release")
 set(PROJECT_TYPE "TEST")
@@ -117,6 +124,8 @@ if (PICOMEM_BOARD STREQUAL "PICOMEM_20")
 endif()
 if (DO_USBHOST)
     add_subdirectory(lib/tusb_xinput)
+    # xinput_host links a "tinyusb" target that does not exist here (tinyusb_host is linked below)
+    set_property(TARGET xinput_host PROPERTY INTERFACE_LINK_LIBRARIES "")
     add_subdirectory(USB_Host_Driver2)
 endif()
 if (ASYNC_UART)
@@ -141,7 +150,10 @@ target_include_directories(picomem
 )
 
 set(CMAKE_EXE_LINKER_FLAGS "-Wl,--print-memory-usage")
-target_compile_options(picomem PRIVATE -save-temps -fverbose-asm -O3) #fast -fmodulo-sched -fmodulo-sched-allow-regmoves)
+target_compile_options(picomem PRIVATE -O3) #fast -fmodulo-sched -fmodulo-sched-allow-regmoves)
+if (PM_SAVE_TEMPS)
+    target_compile_options(picomem PRIVATE -save-temps -fverbose-asm)
+endif()
 
 if (PICOMEM_BOARD STREQUAL "PICOMEM")
       add_compile_definitions(
@@ -265,9 +277,9 @@ elseif (PICOMEM_BOARD STREQUAL "PICOMEM_20")
         USE_SBDSP=1
         USE_LPF=1           # SB16 like band-limited filter on SB / Covox / Disney output (0: sample-and-hold, no filter)
         OPL_FILTER=1        # FM analogue output stage: 0 none (SB16), 1 SB 1.x / 2.0 (RC 12 kHz), 2 SB Pro (RC 8 kHz)
-        SBDSP_IOLOG=0       # 1: Debug, log the Sound Blaster I/O, 8237 DMA writes and IRQs to sbiolog.txt on the SD card
-        USE_GUS=1
-        USE_MPU=1
+        SBDSP_IOLOG=${PM_SBDSP_IOLOG}   # 1: Debug, log the Sound Blaster I/O, 8237 DMA writes and IRQs to sbiolog.txt on the SD card
+        USE_GUS=${PM_USE_GUS}
+        USE_MPU=${PM_USE_MPU}
         SF2_GMGSx=1        # 1 to use the GMGSx sound font
         USE_CDROM=0
         USE_CD_AUDIO_FIFO=0
