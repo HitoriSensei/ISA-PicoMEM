@@ -24,6 +24,9 @@ d.appendChild(l);t.appendChild(d);
 d=document.createElement("td");d.textContent=a=="d"?"":s;t.appendChild(d);
 if(n!=".."){d=document.createElement("td");l=document.createElement("a");l.textContent="delete";
 l.onclick=function(){if(confirm("Delete "+n+"?"))Q("/f"+Z(q),{method:"DELETE"}).then(function(){L(P)}).catch(X)};
+d.appendChild(l);t.appendChild(d);
+d=document.createElement("td");l=document.createElement("a");l.textContent="rename";
+l.onclick=function(){var m=prompt("New name",n);if(m&&m!=n)Q("/mv"+Z(q)+"&t="+encodeURIComponent(Y(P)+"/"+m),{method:"POST"}).then(function(){L(P)}).catch(X)};
 d.appendChild(l);t.appendChild(d)}
 $("t").appendChild(t)}
 function L(p){P=p;$("p").textContent=p;$("t").innerHTML="";

@@ -263,6 +263,17 @@ static void handle_request(conn_t *c)
       sd_off();
       if (fr == FR_OK) status(c, 200, "OK"); else status(c, 500, "Mkdir failed");
      }
+  else if (!strcmp(method, "POST") && !strcmp(target, "/mv")) {   // Rename / move: p -> t
+      char to[PATH_MAX_LEN + 4];
+      if (root || !qget(query, "t", raw, sizeof(raw)) || !resolve(path, raw) || path[1] == 0) { status(c, 400, "Bad Request"); return; }
+      snprintf(to, sizeof(to), "0:%s", path);
+      sd_on();
+      FRESULT fr = f_rename(fp, to);
+      sd_off();
+      if (fr == FR_OK) status(c, 200, "OK");
+         else if (fr == FR_EXIST) status(c, 409, "Already exists");
+         else status(c, 500, "Rename failed");
+     }
   else status(c, 404, "Not Found");
 }
 

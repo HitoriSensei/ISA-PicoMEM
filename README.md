@@ -71,7 +71,7 @@ Details in [PicoMemBlaster audio quality](docs/picomemblaster/AUDIO_QUALITY.md#c
 
 ### Wireless SD card access and firmware updates
 
-- **SD card access from a web browser** (Wi-Fi): browse, download, upload and delete files and create
+- **SD card access from a web browser** (Wi-Fi): browse, download, upload, rename and delete files and create
   folders on the PicoMEM's SD card from any computer on the network, while the PC runs. Needs initial one-time set-up with
   an `http.txt` file on the SD card (static IP address, mask, gateway, optional password,
   [example](#sd-card-access-via-wifi-http)); the page
@@ -398,7 +398,7 @@ The PicoMEM can emulate a ne2000 network card via Wifi.<br />
 
 ## SD card access via Wifi (HTTP)
 
-When the Wifi is connected, the PicoMEM can serve the SD card to a web browser : browse, download, upload, delete files and create folders.<br />
+When the Wifi is connected, the PicoMEM can serve the SD card to a web browser : browse, download, upload, rename, delete files and create folders.<br />
 The Wifi chip is shared with the ne2000 emulation, so the server uses its own **static IP address**.<br />
 
 **How to use it :**

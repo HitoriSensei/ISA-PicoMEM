@@ -1,5 +1,5 @@
 #pragma once
-// Minimal HTTP server giving access to the SD card (browse / download / upload / delete / mkdir).
+// Minimal HTTP server giving access to the SD card (browse / download / upload / delete / rename / mkdir).
 // Open http://<ip>/ in a browser: the page is embedded in the firmware.
 //
 // Configuration : "http.txt" at the root of the SD card, one value per line
