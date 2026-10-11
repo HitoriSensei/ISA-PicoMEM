@@ -138,7 +138,12 @@ Star Wars X-Wing (and other CT-VOICE.DRV games) now play their digitised sounds.
   available with `BIOS 0` / `OFF` in `config.txt`) and the PicoMEM IRQ on its own line.<hr>
 - Fix: the DSP write-status never reported busy. Drivers waiting for the busy bit (CT-VOICE.DRV
   before stop / pause voice) waited 65535 reads, freezing the PC ~130 ms with the interrupts
-  disabled (display, mouse, music). Busy 8 reads out of 16, as on a real DSP and in DOSBox.
+  disabled (display, mouse, music). Busy 8 reads out of 16 while DMA playback runs, as on a real SB
+  and SB Pro (the SB16 flips it all the time). Without DMA it reads ready, so Direct DAC programs
+  that drop a sample when busy (Jill of the Jungle) play at the right speed.
+- Fix: after a DSP reset, AAh is ready 2 us after the reset ends instead of 100 us. Crystal Dream
+  (Triton) pulses the reset and checks the status once, a few us later on a fast CPU, so it didn't
+  find the card unless the CPU cache was off.
 - Fix: the DSP reported busy during the 80h silence, it now keeps taking commands (as in DOSBox).
 - Fix: DSP command E2h fell through to "speaker on" (missing `break`): it was cancelled and its
   argument taken as the next command.

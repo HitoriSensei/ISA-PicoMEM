@@ -37,8 +37,10 @@ code (FM emulation, mixer, `config.txt`) but have not been built or tested with 
   Sound Source** (6 993 Hz FIFO) goes through the band-limited filter.
 - **Creative CT-VOICE.DRV support (Star Wars X-Wing, ...)**: DSP command E2h answered by DMA into the
   PC memory (needs the PicoMEM BIOS), E2h no longer falls through to "speaker on".
-- **No more freezes while samples play**: the DSP write-status reports busy as a real DSP (drivers
-  waiting for it froze the PC for about 130 ms), the 80h silence no longer reports busy.
+- **Corrected busy-bit**: the DSP write-status reports busy during DMA playback as
+  a real SB / SB Pro DSP (drivers waiting for it froze the PC for about 130 ms), and ready without
+  DMA (Direct DAC games that drop a sample when busy played too slowly). The 80h silence no longer
+  reports busy.
 - **Multiple IRQ lines**: choose the PicoMEM IRQ among the jumpered lines (`IRQ` in `config.txt`, now
   including IRQ 6) and keep the others for the Sound Blaster; the PicoMEM IRQ is raised on its own
   line (it collided with a Sound Blaster on IRQ 7).

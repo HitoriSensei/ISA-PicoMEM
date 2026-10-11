@@ -843,9 +843,12 @@ static __force_inline void sbdsp_reset(uint8_t value) {
         case 0:
             if(sbdsp.reset_state==1) {
                 sbdsp.dav_pc=0;
-                // launch the RESET a little later
+                // AAh is ready a few us after the reset ends. 100us is only the longest time
+                // Creative tells drivers to wait. Crystal Dream pulses the reset again before
+                // each single check of 2xE, about 768 empty loops later (5us on a Pentium), so
+                // a 100us delay was cancelled each time and the card was not found on a fast CPU.
                 PIC_RemoveEvent(&DSP_Reset_Event);
-                PIC_AddEvent(&DSP_Reset_Event, 100, 0); // Wait for 100uS
+                PIC_AddEvent(&DSP_Reset_Event, 2, 0);
                 sbdsp.reset_state = 2;
             }
             break;
@@ -974,24 +977,21 @@ uint8_t sbdsp_read(uint8_t address)
         return sbdsp.dav_pc << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
       case DSP_WRITE_STATUS:  // 0x0C : Return bit7=0 if the DSP is ready to receive Command/Data
         {
-        // A real DSP flips its busy bit all the time, and some drivers wait for it: CT-VOICE.DRV
-        // (X-Wing) waits for busy then ready before writing D0 (stop / pause voice), up to 65535
-        // reads (130 ms with the interrupts disabled, from the game timer interrupt) if the bit
-        // never goes up. Busy 8 reads out of 16, as in DOSBox: a driver waiting for ready gets it
-        // within 8 reads.
-        // Not busy during the 80h silence (dac_resume_pending): the DSP keeps taking commands, as
+        // The SB and SB Pro DSP flips its busy bit by itself while DMA playback runs, and is
+        // ready otherwise (the SB16 flips it all the time). Here it is busy 8 reads out of 16
+        // during DMA, as in DOSBox, so a driver waiting for ready gets it within 8 reads.
+        // CT-VOICE.DRV (X-Wing) waits for busy then ready before D0 (stop or pause a playing
+        // voice), and freezes the PC for up to 65535 reads if busy never comes.
+        // Jill of the Jungle reads the status once per timer tick and drops the Direct DAC
+        // sample when busy. It uses no DMA, so it always reads ready.
+        // Crystal Dream polls the busy bit to find the end of a DMA block, and never starts
+        // the next one if the bit keeps flipping after the block (as on the SB16).
+        // Not busy during the 80h silence (dac_resume_pending), the DSP keeps taking commands as
         // in DOSBox (CT-VOICE.DRV also waits for ready with no timeout).
-        // A read after a pause always returns ready and is not counted. Jill of the Jungle reads
-        // the status once per 6KHz timer tick and skips the sample when the DSP is busy, so the
-        // busy reads made it skip 8 ticks out of 12. An interrupt in a polling loop doesn't
-        // restart the count, so CT-VOICE.DRV still sees busy within 8 reads.
         static uint8_t write_status_reads;
-        static uint32_t write_status_last;
-        uint32_t now = time_us_32();
-        bool pause = (now - write_status_last) > 50;
-        write_status_last = now;
-        if (!pause) write_status_reads++;
-        return (sbdsp.dav_dsp | sbdsp.dsp_busy | (!pause && (write_status_reads & 8))) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
+        bool busy = false;
+        if (sbdsp.dma_enabled) busy = (++write_status_reads & 8) != 0;
+        return (sbdsp.dav_dsp | sbdsp.dsp_busy | busy) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
         }
       default:
 //            PM_INFO("SB READ: %x\n\r",address);
