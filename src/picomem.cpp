@@ -47,6 +47,10 @@ If not, see <https://www.gnu.org/licenses/>.
 #include "pm_defines.h"      // Shared MEMORY variables defines (Registers and PC Commands)
 #include "pm_cmd.h"
 #include "pm_libs/pm_libs.h"
+#if PM_FWUPDATE
+#include "fwupdate/pm_fwupdate.h"
+#endif
+#include "sbdsp/sbdsp_iolog.h"
 #include "ff.h"
 #include "pm_libs/pm_disk.h"
 #include "pm_pccmd.h"
@@ -506,6 +510,10 @@ gpio_put(LED_PIN, 1);
 int main(void) 
 {
 
+#if PM_FWUPDATE
+pm_fwupdate_boot();  // BEFORE the overclock and core 1
+#endif
+
 #ifdef BOARD_WM10
 wm_board_init();
 stdio_init_all();
@@ -565,6 +573,10 @@ PM_BASE_DEV_Init();
 
 
 
+
+#if SBDSP_IOLOG
+sbdsp_iolog_init();  // BEFORE core 1 starts the I/O handlers
+#endif
 
 // Set the priority of PROC0 to high
 bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_PROC1_BITS; // 

@@ -139,7 +139,7 @@ static void  pmtsf_free(void* ptr)
 //#include "midi/TimGM6mb.h"
 
 
-#define OUTPUT_SAMPLERATE   49716ul 
+#define OUTPUT_SAMPLERATE   PM_AUDIO_FREQUENCY   // The mixer rate
 
 tsf* tsfrenderer = NULL;
 

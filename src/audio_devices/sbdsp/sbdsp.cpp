@@ -15,6 +15,8 @@ XT : Mod Master XT, Prince of Persia, Ghostbusters 2, Tongue of the Fatman, 4D S
 #include <stdio.h>
 #include <string.h>
 #include "pico_pic.h"
+#include "bandlimit/bl_filter.h"
+#include "bandlimit/ts_dac.h"
 
 bool dma_inprogress=false;
 uint32_t PM_DMA_SendTime;
@@ -26,7 +28,12 @@ uint32_t PM_DMA_SendTime;
 #include "../../pm_libs/isa_dma.h"       // ISA/PC DMA code
 #include "../../pm_libs/bus_irq.h"       // ISA/PC IRQ code
 #include "dev_sbdsp.h"
+#include "sbdsp_iolog.h"
 #include "audio_fifo.h"
+#if USE_HWDMA
+#include "../../pm_libs/isa_irq.h"
+#include "../../pm_libs/pm_pccmd.h"
+#endif
 
 #include "sbdsp.h"
 
@@ -37,12 +44,21 @@ uint32_t PM_DMA_SendTime;
 
 #define DSP_UNUSED_STATUS_BITS_PULLED_HIGH 0x7F
 
-#define MIXER_INTERRUPT         0x80
-#define MIXER_DMA               0x81
-#define MIXER_IRQ_STATUS        0x82
-#define MIXER_STEREO            0xE
+// SB Pro (CT1345) mixer registers
+#define MIXER_RESET             0x00
+#define MIXER_VOICE             0x04
+#define MIXER_MIC               0x0A
+#define MIXER_INPUT             0x0C
+#define MIXER_STEREO            0x0E    // Bit 1 stereo, bit 5 output filter off
+#define MIXER_MASTER            0x22
+#define MIXER_FM                0x26
+#define MIXER_CD                0x28
+#define MIXER_LINE              0x2E
 
-static uint8_t mixer_state[0x48] = { 0 };
+static uint8_t mixer_state[0x30];       // SB Pro mixer registers, 00h-2Fh
+static int32_t sbpro_voice_gain[2];     // Voice x Master, left and right (Q15)
+static bool    sbpro_gain_on;           // Set when a voice gain is not 1
+extern volatile int32_t opl_gain[2];    // FM output gain (opl_dbopl.cpp)
 
 static const int8_t DSP_VERSION_MAJOR[4] = { 0,2,3,4 };
 static const int8_t DSP_VERSION_MINOR[4] = { 0,1,2,5 };
@@ -69,6 +85,8 @@ enum DSP_OUT_MODES {
 };
 
 // Sound Blaster DSP I/O port offsets
+#define MIXER_ADDRESS       0x4     // SB Pro mixer register index
+#define MIXER_DATA          0x5
 #define DSP_RESET           0x6
 #define DSP_READ            0xA
 #define DSP_WRITE           0xC
@@ -90,10 +108,10 @@ enum DSP_OUT_MODES {
 #define DSP_DMA_SINGLE2         0x15    // 1.xx+ :8-bit DMA PCM Output, Single (Alternate)
 #define DSP_DMA_SINGLE_IN       0x24    // !(N/A) 1.xx+ :8-bit DMA PCM Input, Single
 
-#define DSP_DMA_ADPCM_2         0x16    // ! 1.xx+ :8-bit DMA ADPCM 2 bit Output, Single
-#define DSP_DMA_ADPCM_2_REF     0x17    // ! 1.xx+ :8-bit DMA ADPCM 2 bit Output, Single  With Reference
-#define DSP_DMA_ADPCM_4         0x74    // ! 1.xx+ :8-bit DMA ADPCM 4 bit Output, Single
-#define DSP_DMA_ADPCM_4_REF     0x75    // ! 1.xx+ :8-bit DMA ADPCM 4 bit Output, Single with Reference
+#define DSP_DMA_ADPCM_2         0x16    // ! 1.xx+ :8-bit DMA ADPCM 2-bit Output, Single
+#define DSP_DMA_ADPCM_2_REF     0x17    // ! 1.xx+ :8-bit DMA ADPCM 2-bit Output, Single  With Reference
+#define DSP_DMA_ADPCM_4         0x74    // ! 1.xx+ :8-bit DMA ADPCM 4-bit Output, Single
+#define DSP_DMA_ADPCM_4_REF     0x75    // ! 1.xx+ :8-bit DMA ADPCM 4-bit Output, Single with Reference
 #define DSP_DMA_ADPCM_26        0x76    // ! 1.xx+ :8-bit DMA ADPCM 3 bit Output, Single
 #define DSP_DMA_ADPCM_26_REF    0x77    // ! 1.xx+ :8-bit DMA ADPCM 3 bit Output, Single with Reference
 
@@ -116,6 +134,9 @@ enum DSP_OUT_MODES {
  080h           Silence DAC                                         SB
  098h           Auto-Initialize DMA ADC, 8-bit (High Speed)         SB2.0-Pro2
 */
+
+#define DSP_INPUT_MONO          0xA0    // 3.xx, SB Pro mono input mode
+#define DSP_INPUT_STEREO        0xA8    // 3.xx, SB Pro stereo input mode
 
 #define DSP_DMA_PAUSE           0xD0    // 1.xx+ : DMA Pause
 #define DSP_DMA_RESUME          0xD4    // 1.xx+ : DMA Resume
@@ -154,12 +175,57 @@ static PIC_TimerEvent DSP_DMA_Event = {
 };
 static void sbdsp_adpcm_decode_byte(uint8_t raw);
 
-/*
-static uint32_t DSP_DAC_Timer_EventHandler(Bitu val);
-static PIC_TimerEvent DSP_DAC_Timer_Event = {
-    .handler = DSP_DAC_Timer_EventHandler,
-};
-*/
+// Direct DAC (command 10h) written by the CPU at its own rate
+static ts_dac_t sbdsp_dac;
+
+// Output filter of the DMA samples. In stereo it holds the left channel.
+static bl_state_t sbdsp_bl;
+static bl_state_t sbdsp_bl_r;
+static void sbmixer_init();
+
+#if USE_HWDMA
+// DSP command E2 answers with a DMA transfer to the PC memory. CT-VOICE.DRV (X-Wing) needs the
+// answers to unscramble its playback code. The board can't drive a DMA write, so the PC writes the
+// answers in the PicoMEM BIOS command mode.
+#define SBDSP_E2_QSIZE 8
+static volatile uint8_t sbdsp_e2_q[SBDSP_E2_QSIZE];
+static volatile uint32_t sbdsp_e2_head, sbdsp_e2_tail;  // Head written by core 1, tail by the main loop
+
+// Queues an E2 answer and asks the PC to enter the command mode. Runs on core 1.
+static void sbdsp_e2_queue(uint8_t value) {
+    if ((sbdsp.dma8!=1) && (sbdsp.dma8!=3)) return;  // The BIOS reads the channels 1 and 3 only
+    // Needs the PicoMEM IRQ on its own line. On the SB line the program would take it as the SB IRQ.
+    if ((BV_IRQ==0) || (BV_IRQ==sbdsp.irq)) {
+        IOLOG(IOLOG_E2,0xFFFF,BV_IRQ);       // Answer not written
+        return;
+       }
+    uint32_t h=sbdsp_e2_head;
+    if (h-sbdsp_e2_tail>=SBDSP_E2_QSIZE) return;
+    sbdsp_e2_q[h%SBDSP_E2_QSIZE]=value;
+    sbdsp_e2_head=h+1;
+    isa_pm_irq_raise(IRQ_R_PCCMD,1,false);
+}
+
+// Writes the queued E2 answers once the BIOS waits for a command in the PicoMEM IRQ
+static void sbdsp_e2_send(void) {
+    if (sbdsp_e2_tail==sbdsp_e2_head) return;
+    if (!(SVAR_IRQ->ISR & (1<<IRQ_R_PCCMD)) || (PCCR_PCSTATE!=PCC_PCS_WAITCMD)) return;
+    uint8_t page;
+    uint16_t offset, count;
+    PC_GetDMARegs(sbdsp.dma8,&page,&offset,&count);   // Current address and count
+    uint32_t t=sbdsp_e2_tail;
+    uint16_t n=0;
+    while (t+n!=sbdsp_e2_head) {
+        uint8_t value=sbdsp_e2_q[(t+n)%SBDSP_E2_QSIZE];
+        PC_MW8(((uint32_t) page<<16)+(uint16_t) (offset+n),value);   // The address increments inside the 64KB page
+        IOLOG(IOLOG_E2,(uint16_t) (offset+n),value);
+        n++;
+       }
+    sbdsp_e2_tail=t+n;
+    PC_SetDMARegs(sbdsp.dma8,(uint16_t) (offset+n),(uint16_t) (count-n),0);
+    PC_End();
+}
+#endif
 
 static __force_inline void sbdsp_dma_disable() {
     sbdsp.mode=MODE_NONE;
@@ -183,35 +249,6 @@ static __force_inline void sbdsp_dma_enable() {
     } else { PM_INFO("SB> DMA Already Enabled"); }
 }
 
-/*
-static __force_inline bool sbdsp_dac_enable() {
-    if (sbdsp.mode==MODE_NONE)  // Start DAC if only in MODE_NONE
-      {
-        //afifo_reset8(&sbdsp_fifo); // Reset the FIFO
-        //Set the sb dsp output rate to 31KHz
-        sbdsp.dac_interval = 32;    //Simulate a DAC at 31250 Hz max
-        sbdsp.sample_step  = (31250 * 65536ul) / PM_AUDIO_FREQUENCY; // Step for the Audio rate convertion
-        sbdsp.increment    = 0;
-        sbdsp.readsample   = true;
-        sbdsp.prev_sample8u = 0x80;
-
-        PIC_AddEvent(&DSP_DAC_Timer_Event, sbdsp.dac_interval, 0);
-        sbdsp.mode=MODE_DAC;
-        return true;
-      }
-
-    PM_INFO("SB> Cant start DAC");
-    return false;
-}
-
-static __force_inline void sbdsp_dac_disable() {
-    if (sbdsp.mode==MODE_DAC)
-      {
-        sbdsp.dac_interval=0;    //Stop the DAC timer if running
-        PIC_RemoveEvent(&DSP_DAC_Timer_Event);
-      }
-}
-*/
 
 static uint32_t __not_in_flash_func(DSP_DMA_EventHandler)(Bitu val) {
     uint32_t current_interval;
@@ -286,14 +323,6 @@ static void __not_in_flash_func(sbdsp_dma_isr)(void) {
       else dma_inprogress=false;
 }
 
-static uint32_t __not_in_flash_func(DSP_DAC_EventHandler)(Bitu val) {
-  if (sbdsp.mode==MODE_DAC)
-     {
-       afifo_add_sample8(&sbdsp_fifo, sbdsp.cur_sample8);
-     }
-  return sbdsp.dac_interval;
-}
-
 // Send an IRQ after some time, for "Tinny" DMA transfer simulation
 static uint32_t DSP_DMA_IRQ_EventHandler(Bitu val) {
   DBG_ON_IRQ_SB();
@@ -306,7 +335,7 @@ static PIC_TimerEvent DSP_DMA_IRQ_Event = {
     .handler = DSP_DMA_IRQ_EventHandler,
 };
 
-// Used by the DAC PAUSE command pending status is reflected in the DSP status port read
+// Raises the interrupt at the end of the 80h silence
 static uint32_t DSP_DAC_Resume_eventHandler(Bitu val) {
   bus_irq_raise(IRQ_R_AUDIO,sbdsp.irq,true);
   //sbdsp.mainloop_action=DSP_MLC_SENDIRQ;
@@ -343,6 +372,15 @@ void sbdsp_init()
 
 
     afifo_init8(&sbdsp_fifo); // initialize the audio FIFO
+    bl_init();                // Output filter
+    bl_reset(&sbdsp_bl);
+    sbdsp_bl.post.sb = true;
+    ts_dac_init(&sbdsp_dac);  // Direct DAC
+    sbdsp_dac.post.sb = true;
+    bl_reset(&sbdsp_bl_r);    // Right channel of the SB Pro stereo
+    sbdsp_bl_r.post.sb = true;
+    sbdsp.dma_stereo = false;
+    sbmixer_init();
 
 #ifdef BOARD_PICOMEM
     PM_INFO("sbdsp_init\n");
@@ -368,6 +406,7 @@ static __force_inline uint8_t sbdsp_codes_per_byte(uint8_t out_mode) {
 
 void sbdsp_start_pcm_dma(bool autoinit, uint16_t xfer_size, uint8_t out_mode) {
     PM_INFO("DMA %d,%d,%d",autoinit,xfer_size,out_mode);
+    IOLOG(IOLOG_DSP,xfer_size,out_mode|(autoinit ? 0x80 : 0));
      sbdsp.dav_dsp=0;
      sbdsp.autoinit=autoinit;
      sbdsp.dma_mode = out_mode;
@@ -548,9 +587,9 @@ void sbdsp_process(void) {
             break;
 
 
-        case DSP_DMA_ADPCM_4_REF: // ! 1.xx+ :8-bit DMA ADPCM 2 bit Output, Single  With Reference
+        case DSP_DMA_ADPCM_4_REF: // ! 1.xx+ :8-bit DMA ADPCM 2-bit Output, Single  With Reference
             sbdsp.adpcm_ref=true;
-        case DSP_DMA_ADPCM_4:     // ! 1.xx+ :8-bit DMA ADPCM 2 bit Output, Single
+        case DSP_DMA_ADPCM_4:     // ! 1.xx+ :8-bit DMA ADPCM 2-bit Output, Single
             if(sbdsp.dav_dsp) {
                 if(sbdsp.current_command_index==1) {
                     sbdsp.dma_sample_count = sbdsp.inbox;
@@ -592,6 +631,11 @@ void sbdsp_process(void) {
             }
             break;
 
+        case DSP_INPUT_MONO:       // SB Pro input modes. Recording is not emulated.
+        case DSP_INPUT_STEREO:
+            sbdsp.current_command=0;
+            break;
+
         case DSP_IRQ:
      //       PM_INFO("DSP_IRQ\n");
             sbdsp.current_command=0;
@@ -631,12 +675,16 @@ void sbdsp_process(void) {
                     sbdsp.current_command = 0;
                     sbdsp.ident_e2[0] += sbdsp.inbox ^ sbdsp.ident_e2[1];
                     sbdsp.ident_e2[1] = (sbdsp.ident_e2[1] >> 2) | (sbdsp.ident_e2[1] << 6);
-                    // ideally it should output this byte via DMA, but we don't support DMA IORs yet
-                    // so stuff to outbox for now
+                    // The answer is a DMA transfer (see sbdsp_e2_queue). It also goes in the outbox for
+                    // the programs that read it there.
+#if USE_HWDMA
+                    sbdsp_e2_queue(sbdsp.ident_e2[0]);
+#endif
                     sbdsp_output(sbdsp.ident_e2[0]);
                 }
                 sbdsp.current_command_index++;
             }
+            break;
         case DSP_ENABLE_SPEAKER:
             PM_INFO("ENABLE SPEAKER\n");
             sbdsp.speaker_on = true;
@@ -655,13 +703,13 @@ void sbdsp_process(void) {
             break;
 
         case DSP_DIRECT_DAC:
+            // Takes the sample as soon as it is written, to time stamp it at the write. Waiting for
+            // the next DSP access delays the last sample of a sound (Jill of the Jungle).
             if(sbdsp.dav_dsp) {
-                if(sbdsp.current_command_index==1) {
-                    sbdsp.cur_sample8=sbdsp.inbox;
-                    sbdsp.dav_dsp=0;
-                    sbdsp.current_command=0;
-                }
-                sbdsp.current_command_index++;
+                sbdsp.cur_sample8=sbdsp.inbox;
+                ts_dac_write(&sbdsp_dac, sbdsp.inbox);
+                sbdsp.dav_dsp=0;
+                sbdsp.current_command=0;
             }
             break;
         case DSP_DIRECT_ADC:
@@ -748,7 +796,6 @@ static uint32_t DSP_Reset_EventHandler(Bitu val) {
     sbdsp.dma_xfer_count_left = 0;
     sbdsp.dma_sample_count=0;
     sbdsp.dma_sample_count_rx=0;
-    sbdsp.dma_stereo = false;
     sbdsp.dma_signed = false;
     sbdsp.dma_mode = DSP_DMA_8U;
     sbdsp.adpcm_ref = false;
@@ -779,6 +826,7 @@ static __force_inline void sbdsp_reset(uint8_t value) {
 #if USE_HWDMA
             isa_dma_stop_write();
             afifo_reset8(&sbdsp_fifo); // Reset the Audio FIFO
+            sbdsp.stereo_origin = 0;
 #else
             sbdsp.mainloop_action=DSP_MLC_DMA_RESET;
 #endif
@@ -789,9 +837,10 @@ static __force_inline void sbdsp_reset(uint8_t value) {
         case 0:
             if(sbdsp.reset_state==1) {
                 sbdsp.dav_pc=0;
-                // launch the RESET a little later
+                // AAh is ready 2us after the reset ends. Crystal Dream checks it only once, a few us
+                // after the reset.
                 PIC_RemoveEvent(&DSP_Reset_Event);
-                PIC_AddEvent(&DSP_Reset_Event, 100, 0); // Wait for 100uS
+                PIC_AddEvent(&DSP_Reset_Event, 2, 0);
                 sbdsp.reset_state = 2;
             }
             break;
@@ -800,61 +849,115 @@ static __force_inline void sbdsp_reset(uint8_t value) {
     }
 }
 
-static __force_inline uint8_t sbmixer_read(void) {
-  uint8_t ret=0;
+// Gains of the SB Pro mixer volume steps (bits 7-5 left, 3-1 right), from -46dB to 0dB. Step 4 is
+// -11dB as documented by Creative.
+static const int32_t sbpro_vol_gain[8] = { 164, 2603, 3970, 6055, 9235, 14086, 21484, 32768 };   // Q15
 
-  switch (sbdsp.mixer_command) {
-        case 0x00:
-            return 0x00;
-        case MIXER_INTERRUPT:
-			 switch (sbdsp.irq) {
-					case 2:  return 0x1;
-					case 5:  return 0x2;
-					case 7:  return 0x4;
-					case 10: return 0x8;
-				   }
-             break;
-        case MIXER_DMA:
-			 switch (sbdsp.dma8) {
-					case 0:ret|=0x1;break;
-					case 1:ret|=0x2;break;
-					case 3:ret|=0x8;break;
-				    }
-             break;
-        case MIXER_IRQ_STATUS:
-            // Bits 0-1: 8/16-bit IRQ pending. Bit 5: SB16 type identifier.
-            return (sbdsp.irq_8_pending ? 0x01 : 0) | (sbdsp.irq_16_pending ? 0x02 : 0) | 0x20;
-        default:
-            if (sbdsp.mixer_command<0x48) return mixer_state[sbdsp.mixer_command];
-               else return 0x0A;
-    }
-  return ret;
+static inline int32_t sbpro_vol(uint8_t reg, int ch) {
+    return sbpro_vol_gain[ch ? ((reg >> 1) & 7) : (reg >> 5)];
 }
 
-static __force_inline void sbmixer_write(uint8_t value) {
-    switch (sbdsp.mixer_command) {
-        case 0x00: // Mixer reset
-            memset(mixer_state, 0, sizeof(mixer_state));
-            break;
-        case MIXER_INTERRUPT:
-            // sbdsp.interrupt = value;
-            break;
-        case MIXER_DMA:
-            // sbdsp.dma = value;
-            break;
+// Computes the gains of the SB digital output and of the FM from the mixer registers
+static void sbmixer_update_gains() {
+    for (int ch = 0; ch < 2; ch++) {
+        if (sbdsp.type == SBT_PRO2) {
+            int32_t master = sbpro_vol(mixer_state[MIXER_MASTER], ch);
+            sbpro_voice_gain[ch] = (sbpro_vol(mixer_state[MIXER_VOICE], ch) * master) >> 15;
+            opl_gain[ch] = (sbpro_vol(mixer_state[MIXER_FM], ch) * master) >> 15;
+        } else {
+            sbpro_voice_gain[ch] = 32768;
+            opl_gain[ch] = 32768;
+        }
+    }
+    sbpro_gain_on = (sbpro_voice_gain[0] != 32768) || (sbpro_voice_gain[1] != 32768);
+}
+
+static void sbmixer_set_stereo(bool stereo) {
+    if (stereo == sbdsp.dma_stereo) return;
+    // Drops the bytes already in the FIFO, so the next byte is a right sample
+    sbdsp.stereo_origin = sbdsp_fifo.samples_received;
+    sbdsp.dma_stereo = stereo;
+}
+
+// Sets the register values after a mixer reset, as documented by Creative
+static void sbmixer_reset() {
+    memset(mixer_state, 0, sizeof(mixer_state));
+    mixer_state[MIXER_VOICE]  = 0x88;
+    mixer_state[MIXER_MASTER] = 0x88;
+    mixer_state[MIXER_FM]     = 0x88;
+    bl_sbpro_filter = true;
+    sbmixer_set_stereo(false);
+    sbmixer_update_gains();
+}
+
+// Sets the mixer of a newly installed card. Voice, Master and MIDI start at the maximum, as set by
+// SBP-SET in DOS.
+static void sbmixer_init() {
+    sbmixer_reset();
+    mixer_state[MIXER_VOICE]  = 0xEE;
+    mixer_state[MIXER_MASTER] = 0xEE;
+    mixer_state[MIXER_FM]     = 0xEE;
+    sbmixer_update_gains();
+}
+
+// Returns the register index after the CT1600 mirrors, or -1 above 3Fh
+static int sbmixer_index() {
+    uint8_t i = sbdsp.mixer_command;
+    if (i >= 0x40) return -1;
+    i = (i < 0x20) ? (i & 0x0F) : (0x20 | (i & 0x0F));
+    if (i == 0x0F) i = MIXER_STEREO;
+    return i;
+}
+
+static uint8_t sbmixer_read(void) {
+    int i = sbmixer_index();
+    if (i < 0) return 0xFF;
+    if (i <= 0x01) i = MIXER_STEREO;   // Reading 00h and 01h reads 0Eh on the CT1600
+    uint8_t v = mixer_state[i];
+    switch (i) {
+        case MIXER_VOICE:
+        case MIXER_MASTER:
+        case MIXER_FM:
+        case MIXER_CD:
+        case MIXER_LINE:
+            return v | 0x11;               // The unused bits read 1
         case MIXER_STEREO:
-            sbdsp.dma_stereo = value & 2;
-            // no break
+            return (v & 0x22) | 0x11;      // 11h after a reset on the CT1600
+        case MIXER_INPUT:
+            return (v & 0x2E) | 0x11;
+        case MIXER_MIC:
+            return v & 0x06;
         default:
-            if (sbdsp.mixer_command<0x48) mixer_state[sbdsp.mixer_command] = value;
-            break;
+            return v;
     }
 }
 
+static void sbmixer_write(uint8_t value) {
+    int i = sbmixer_index();
+    if (i < 0) return;
+    if (i <= 0x01) {                   // Writing 00h or 01h resets the mixer
+        sbmixer_reset();
+        return;
+    }
+    mixer_state[i] = value;
+    switch (i) {
+        case MIXER_STEREO:
+            bl_sbpro_filter = !(value & 0x20);
+            sbmixer_set_stereo(value & 0x02);
+            break;
+        case MIXER_VOICE:
+        case MIXER_MASTER:
+        case MIXER_FM:
+            sbmixer_update_gains();
+            break;
+    }
+}
 
 uint8_t sbdsp_read(uint8_t address)
 {
  switch(address) {
+      case MIXER_DATA:
+            return (sbdsp.type == SBT_PRO2) ? sbmixer_read() : 0xFF;
       case DSP_READ:          // 0x0A : Return DSP Data, if the outbox is not empty
             sbdsp.dav_pc=0;
             return sbdsp.outbox;
@@ -864,7 +967,16 @@ uint8_t sbdsp_read(uint8_t address)
 //            PM_INFO("iAck");
         return sbdsp.dav_pc << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
       case DSP_WRITE_STATUS:  // 0x0C : Return bit7=0 if the DSP is ready to receive Command/Data
-        return (sbdsp.dav_dsp | sbdsp.dsp_busy | sbdsp.dac_resume_pending) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
+        {
+        // Busy 8 reads out of 16 during DMA playback as on the SB and SB Pro, ready otherwise.
+        // CT-VOICE.DRV (X-Wing) freezes the PC if busy never comes. Jill of the Jungle drops its
+        // Direct DAC samples when busy. Crystal Dream finds the end of a DMA block when the bit
+        // stops flipping. The DSP stays ready during the 80h silence.
+        static uint8_t write_status_reads;
+        bool busy = false;
+        if (sbdsp.dma_enabled) busy = (++write_status_reads & 8) != 0;
+        return (sbdsp.dav_dsp | sbdsp.dsp_busy | busy) << 7 | DSP_UNUSED_STATUS_BITS_PULLED_HIGH;
+        }
       default:
 //            PM_INFO("SB READ: %x\n\r",address);
             return 0xFF;
@@ -885,6 +997,18 @@ bool sbdsp_write(uint8_t address, uint8_t value)
         case DSP_RESET:         // 0x06 : Reset Port (Write 0 then 1)
             sbdsp_reset(value);
             return true;
+            break;
+        case MIXER_ADDRESS:
+            sbdsp.mixer_command = value;
+            break;
+        case MIXER_DATA:
+            if (sbdsp.type == SBT_PRO2) sbmixer_write(value);
+            else {
+                // The SB 2.0 has no mixer. Only the output filter switch is followed for programs
+                // set up for an SB Pro.
+                if (sbdsp.mixer_command == MIXER_RESET) bl_sbpro_filter = true;
+                else if (sbdsp.mixer_command == MIXER_STEREO) bl_sbpro_filter = !(value & 0x20);
+            }
             break;
         default:
           //  PM_INFO("SB WRITE: %x => %x \n\r",value,address);
@@ -1053,6 +1177,8 @@ void sbdsp_dma_worker()
         // dma_inprogress=false;
         }
 
+    sbdsp_e2_send();   // E2 command answers to write in the PC memory
+
 #else
 
 #if DBG_PIN_AUDIO
@@ -1095,44 +1221,50 @@ if (sbdsp.mainloop_action==DSP_MLC_SENDIRQ) {  // Perform the reset here, to not
 #endif
 }
 
+// Adds the DSP output (Direct DAC and DMA) to the buff
+static void sbdsp_render(int16_t* buff,uint32_t samples)
+{
+  // Direct DAC
+  if (ts_dac_pending(&sbdsp_dac)) ts_dac_render(&sbdsp_dac, buff, samples);
+
+  const uint32_t rate = sbdsp.sample_rate ? sbdsp.sample_rate : 22050;
+  if (sbdsp.dma_stereo) {
+      int32_t old = (int32_t) (sbdsp.stereo_origin - sbdsp_fifo.samples_sent);
+      if (old > 0) afifo_drop8(&sbdsp_fifo, old);
+  }
+  if (sbdsp.dma_stereo) bl_render_fifo8s(&sbdsp_bl, &sbdsp_bl_r, &sbdsp_fifo, rate / 2, buff, samples);   // SB Pro, right and left bytes
+    else bl_render_fifo8(&sbdsp_bl, &sbdsp_fifo, rate, buff, samples);   // 8-bit mono
+}
+
+static int16_t sbdsp_mixbuf[PM_SAMPLES_PER_BUFFER*2];
+
 // return an audio buffer by reading from the audio fifo
 void sbdsp_updatebuffer(int16_t* buff,uint32_t samples)
 {
-  int8_t   res8u;
-  uint16_t prev_increment;
-  int16_t  fres;
-  res8u=sbdsp.prev_sample8u;
-  /*
- if (sbdsp.mainloop_action==DSP_MLC_SET_TIME_CST)
-    {
-
-    }
-*/
-
-//  PM_INFO("SB_GetBuffer\n");
- if (sbdsp.dma_stereo)
-  {
+  if (!sbpro_gain_on) {
+      sbdsp_render(buff, samples);
+      return;
   }
-    else
-  {
-    for (uint32_t sn=0;sn<samples*2;sn+=2)  // Stereo, so 2x more data than "samples"
-      {
-       // 8Bit Not signed
-        if (sbdsp.readsample)
-             if (!afifo_take_sample8(&sbdsp_fifo, &res8u))
-              {
-                 sbdsp.prev_sample8u=0x80;  // If the FIFO is empty, return silence
-                return;
-              }
-        fres=(int16_t) ((res8u<<8)+0x8000)/4;  // Convert to 16Bit signed
-        prev_increment=sbdsp.increment;
-        sbdsp.increment+=sbdsp.sample_step;    // Adjust the DMA buffer to the Output frequency
-        sbdsp.readsample = (sbdsp.increment<=prev_increment) ? true : false;
-
-        buff[sn]   += fres;
-        buff[sn+1] += fres;
+  // SB Pro mixer Voice and Master volumes
+  const int32_t gl = sbpro_voice_gain[0], gr = sbpro_voice_gain[1];
+  while (samples) {
+      const uint32_t n = MIN(samples, (uint32_t) PM_SAMPLES_PER_BUFFER);
+      memset(sbdsp_mixbuf, 0, n * 2 * sizeof(int16_t));
+      sbdsp_render(sbdsp_mixbuf, n);
+      for (uint32_t i = 0; i < n * 2; i += 2) {
+          int32_t l = buff[i]   + ((sbdsp_mixbuf[i]   * gl) >> 15);
+          int32_t r = buff[i+1] + ((sbdsp_mixbuf[i+1] * gr) >> 15);
+          buff[i]   = (int16_t) (l > 32767 ? 32767 : l < -32768 ? -32768 : l);
+          buff[i+1] = (int16_t) (r > 32767 ? 32767 : r < -32768 ? -32768 : r);
       }
-    sbdsp.prev_sample8u=res8u;  // Save the last Sample for the next time
-   }
+      buff += n * 2;
+      samples -= n;
+  }
+}
 
+// Sets the Sound Blaster type (SBT_2, SBT_PRO2, or SBT_NONE when removed) and resets its mixer
+void sbdsp_set_type(uint8_t type)
+{
+  sbdsp.type = type;
+  sbmixer_init();
 }

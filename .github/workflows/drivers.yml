@@ -1,0 +1,47 @@
+name: Drivers
+
+# Publishes the DOS drivers and tools of the drivers/ folder as a release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'drivers/**'
+      - '.github/workflows/drivers.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: drivers
+
+      - name: Version
+        id: version
+        run: |
+          now=$(date -u +%s)
+          echo "name=PMB-drivers-$(date -u -d "@$now" +%Y-%m-%d)-$(printf '%05d' $((now % 86400)))" >> "$GITHUB_OUTPUT"
+
+      - name: Zip drivers
+        working-directory: drivers
+        run: zip -9 -r "../${{ steps.version.outputs.name }}.zip" . -x .gitignore
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          gh release create "$NAME" "$NAME.zip" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            --title "$NAME" --notes "PicoMEM DOS drivers and tools (drivers/ folder) from ${GITHUB_SHA}."

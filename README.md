@@ -1,3 +1,269 @@
+# PicoMemBlaster
+
+PicoMemBlaster is a fork of the [ISA PicoMEM](https://github.com/FreddyVRetro/ISA-PicoMEM)
+firmware for the **PicoMEM 2.0**. It focuses on the **Sound Blaster**, with better
+**compatibility** with games and drivers and better **sound quality** of both its digital audio and
+its FM (OPL) music. The Covox and Disney Sound Source outputs get the digital audio
+improvements too.
+
+It is based on the official PicoMEM 2 firmware from before the CD-ROM emulation. As of October 11,
+2026, only that source is available.
+
+While the PicoMEM 1.x (RP2040) firmware shares part of the changed
+code (FM emulation, mixer, `config.txt`), only the PicoMEM 2.0 has been tested (I don't have access
+to the PicoMEM 1.x hardware).
+
+The audio output has been benchmarked against Nuked OPL3 (the FM part) and the real SB16 measured output curve (the digital part).
+The results are documented in [PicoMemBlaster audio quality](docs/picomemblaster/AUDIO_QUALITY.md).
+
+## Changes from the official PicoMEM firmware
+
+### Sound Blaster digital audio (and Covox / Disney)
+
+The 8-bit DMA sound got a few selectable filtering modes.
+
+In SB16 filter mode (enabled by default) it is resampled through a 48 tap
+windowed sinc whose cutoff follows the playback rate, similar to the "brickwall" filter of the real SB16 (just not as steep).
+
+The SB Pro 2 filter applies a 3.2kHz low-pass + the analogue stage, matching the SB Pro 2 hardware.
+
+The "analogue" filter applies a 8kHz RC low-pass and DC blocking, gently reducing the aliasing and harshness without making the sound dull, similar to many analogue stages or older sound cards. This filter is applied by default to FM output and Covox output.
+
+The **output filter mode** can be changed at run time with `PMINIT /lpf x`:
+
+- 0, no filter (sample-and-hold)
+- 1, the SB16 filter (default)
+- 2, the SB Pro 2 low-pass (3.2kHz, switched by the program through mixer register 0Eh) and the
+  card analogue stage
+- 3, the analogue stage alone (8kHz RC low-pass and DC blocking, as on the SB Pro FM output)
+
+**Sound Blaster Pro 2 emulation** is available next to the default Sound Blaster 2.0 emulation. In
+`config.txt`, add the type "4" after the port, IRQ and DMA (`SB 220 5 1 4`). In DOS, set `T4` in the
+`BLASTER` variable (`SET BLASTER=A220 I5 D1 T4`) and run `PMINIT /sb 1`. With `T3`, or without a
+type, the Sound Blaster 2.0 is emulated.
+(Note: If you set up the card in `config.txt` you DON'T have to call `PMINIT`, unless you want to 
+change the card characteristics in runtime.)
+
+Software used to test the SB Pro 2 stereo emulation:
+
+- Duke Nukem 3D (no channel reverse needed)
+- Quake
+- Epic Pinball
+- Crystal Dream
+- Wolfenstein 3D 1.4 (Uses mixer panning for "stereo")
+
+**DSP Direct DAC (command 10h)** is supported. Every write is time stamped, and the mixer replays
+the samples with the same timing. In the SB16 filter mode it only goes through the analogue stage
+because the sinc filter needs a stable sample rate.
+
+Software used to test:
+- Jill of the Jungle (old ver)
+- Doom2D
+
+The **Covox DAC** is replayed the same way and no longer needs a 43kHz timer interrupt. The
+**Disney Sound Source** (6993Hz FIFO) goes through the band-limited filter.
+
+The **DSP reset response is faster**. The reset answer (AAh) is ready 2us after the reset instead of 100us,
+so Crystal Dream, and other software that probes the reset status, finds the card on a fast CPU (Tested on P3 450MHz).
+
+Added fix for **IRQ lines**. Previously the IRQ7 line could not be used for SB, because it collided with PicoMEM bios
+IRQ. Now BIOS and SB can choose any of the IRQ lines.
+
+### FM (OPL2 / OPL3)
+
+The **OPL emulation was checked against Nuked OPL3**. Its fixes are listed in [FM fixes](#fm-fixes).
+
+Added the gentle **analogue output stage** filter by default.
+
+The **FM port sets are now separately configurable**. `PMINIT /sbopl` switches the Sound Blaster FM ports
+(base+8/+9) and `/adlib` only the AdLib ports, so a real OPL card can be used next to the emulated
+Sound Blaster. The AdLib port can be moved with `Fxxx` in `BLASTER` (e.g. `F380`).
+
+### Cost
+
+The main CPU cost is the SB16 filter. Below are the estimated CPU and RAM usage increases:
+
+| Part | Extra load                                                                       |
+|------|----------------------------------------------------------------------------------|
+| Sound Blaster digital audio | +3.5% per playing stream (build with `USE_LPF=0` to restore the sample-and-hold) |
+| FM | +1.8% with 9 voices playing, +2.8% with 18                                       |
+| Covox DAC | +1.8% while a program writes it                                                  |
+| RAM | +19KB, of which 12KB is the filter kernel                                        |
+
+Details are in [PicoMemBlaster audio quality](docs/picomemblaster/AUDIO_QUALITY.md#cpu-and-ram-cost).
+
+### Gravis UltraSound and General MIDI (MPU-401)
+
+The GUS and MPU-401 / General MIDI emulation are not modified in this fork. They are only touched
+by the FM mixing fix listed below and by the new `config.txt` `GUS` and `MPU` keys, which start them
+at boot.
+
+Both are untested in PicoMemBlaster and may or may not be affected by the other changes.
+
+## Fixes
+
+### Sound Blaster fixes
+
+- Star Wars X-Wing and other games using Creative's CT-VOICE.DRV had no digitized sound. DSP command
+E2h is now answered by DMA into the PC memory, which needs the PicoMEM BIOS.
+
+- DSP command E2h fell through to "speaker on" because of a missing `break`. This cancelled it and
+took its argument as the next command.
+
+- The DSP write-status never reported busy, so drivers waiting for it froze the PC for about 130ms at
+a time. It now reports busy during DMA playback as a real SB or SB Pro DSP does, and ready without
+DMA. Jill of the Jungle needs the ready state because it drops its Direct DAC sample when the DSP
+is busy. Crystal Dream finds the end of each DMA block when the bit stops changing.
+
+- The DSP reported busy during the 80h silence command and stopped taking commands.
+
+- On the PicoMEM 2.0 the PicoMEM IRQ was always raised on the IRQ 7 line, whatever IRQ the BIOS
+chose. It collided with a Sound Blaster on IRQ 7.
+
+- `IRQ 6` in `config.txt` was ignored on the PicoMEM 2.0.
+
+### FM fixes
+
+- OPL2 rhythm mode drums were written as mono into the stereo buffer and came out garbled.
+
+- The hi-hat, snare and top cymbal used a different noise generator, phase bit formula, snare noise
+polarity and cymbal phase than the chip.
+
+- Drums using waveforms 0, 5, 6 or 7 were sign-flipped or read from the wrong part of the waveform
+table.
+
+- OPL3 drums ignored the left and right panning of their channels.
+
+- The FM carrier used the modulator output of the previous sample. This changed the sound of every
+FM voice with feedback.
+
+- Waveform 7 started half a period off.
+
+- Tremolo, Vibrato and Attacks fixes, described in detail in [PicoMemBlaster audio quality](docs/picomemblaster/AUDIO_QUALITY.md).
+
+- The sine and the other waveforms used linear arithmetic instead of the log-sine and exponential
+tables of the chip.
+
+- Loud FM passages wrapped around (overflow) instead of clipping.
+
+- The FM output overwrote the General MIDI (MPU) output in the mixer instead of being mixed with it.
+
+## Additional features
+
+### Configuration without PMINIT
+
+`config.txt` can set up the whole card at power on with the `SB`, `SBOPL`, `ADLIB <port>`, `CMS`,
+`TDY`, `MMB`, `CVX` / `DSS`, `GUS`, `MPU` and `JOY` keys.
+
+```
+SB 220 5 1 3   # Sound Blaster: 0 (off) / 1 (220 5 1) / port [irq [dma [type 3 SB 2.0, 4 SB Pro 2]]]
+SBOPL 1        # its FM ports, base+8/+9
+ADLIB 388      # 0 / 1 (388) / port
+CMS 0          # 0 / 1 (220) / 210-260
+TDY 0          # 0 / 1 (2C0) / C0, 1E0, 2C0, 300
+MMB 0          # 0 / 1 (300) / 220, 2F0, 300, 310, 320
+CVX 1          # Covox: 0 / 1 (LPT1) / 2 (LPT2) / 278, 300, 378, 3BC   (or DSS: Disney)
+GUS 0          # 0 / port [irq [dma]]
+MPU 330        # 0 / 1 (330) / 300, 320, 330, 340, 360
+JOY 1          # USB joystick
+```
+
+With this, the whole card can be configured without `PMINIT`.
+
+### Wireless SD card access and firmware updates
+
+- **SD card access over Wi-Fi**. It needs a one-time set-up with an `http.txt` file on the SD card
+([example](#sd-card-access-via-wifi-http)). The Wi-Fi must first be configured as described in
+[ne2000 emulation via Wi-Fi](#ne2000-emulation-via-wifi).
+
+- **Firmware update from the SD card** (PicoMEM 2.0 only). Needs one-time `partition.uf2` flash (see [One-time setup](#One-time-setup)). Put the `picomem.uf2` at the root of
+the SD card and restart the PC. The PicoMEM installs it into the free slot of an A/B flash layout
+and rolls back a firmware that does not start. The progress is displayed on the OLED display (if you have one).
+
+### Development and debugging
+
+The **Sound Blaster I/O log** helps to find compatibility problems. A firmware built with
+`PM_SBDSP_IOLOG=1` records what a program does with the emulated Sound Blaster in the `sbiolog.txt` on
+the SD card ([details](#sound-blaster-io-log-on-the-sd-card-picomem-20)). It is off in normal
+builds because it uses 24KB of RAM and its SD card writes can disturb the audio.
+
+`PM_FW_TBYB=0` builds a firmware without the "Try Before You Buy" flag, to load it with a debugger
+(SWD).
+
+### SD card access via Wifi (HTTP)
+
+When the Wifi is connected, the PicoMEM can serve the SD card over HTTP. The Wifi chip is shared with
+the ne2000 emulation, so the server uses its own **static IP address**.
+
+### Set-up
+
+Create an `http.txt` file at the root of the SD card with one value per line:
+
+```
+# PicoMEM HTTP server
+# IP address (static, free on the network)
+192.168.1.50
+# Network mask
+255.255.255.0
+# Gateway
+192.168.1.1
+# Password (optional, up to 39 characters, letters and digits are safest because it is sent in the URL)
+retro486
+```
+
+Without the `http.txt` the HTTP server is not started.
+
+### Use
+
+Open `http://192.168.1.50/` in a browser. From the command line, upload with
+`curl -T file.zip "http://192.168.1.50/f?p=/file.zip"` and download with
+`curl -o file.zip "http://192.168.1.50/f?p=/file.zip"`. Add `&k=PASSWORD` when a password is set.
+
+The PicoMEM main loop reads and writes the files, so a transfer may briefly disturb the audio. Don't
+write to the disk image files of the emulated hard disk while the PC is running as this may cause an 
+FS corruption.
+
+## Firmware update from the SD card (PicoMEM 2.0)
+
+### One-time setup
+
+The partition table and then the firmware are installed over USB in BOOTSEL mode.
+
+Copy the `partition.uf2` to the RP2350 drive. The board should come back in BOOTSEL mode.
+If it doesn't, reconnect it with BOOTSEL pressed.
+The`picotool partition info` command should then show the A and B partitions.
+
+Copy the `picomem.uf2` to the RP2350 drive.
+
+### Update
+
+Copy the `picomem.uf2` (the normal build output) to the root of the SD card, or upload it from the
+browser with the HTTP server. Then restart the PicoMEM.
+
+When PicoMEM starts, it begins the flash process (you should see the "Updating..." message in the OLED if you use one). The update process should not be noticed by the PC as it is
+still in its own POST. However, if the PC reached the PicoMEM BIOS during the update and boots without the PicoMEM or hangs, the PC be **restarted**.
+
+After the flash is complete (or aborted), the FW file is renamed to `picomem.uf2.done` or `picomem.uf2.bad`, and the result is written in the
+`fwupdate.txt`.
+
+Note: Copying the `picomem.uf2` in BOOTSEL mode still works too.
+
+## Sound Blaster I/O log on the SD card (PicoMEM 2.0)
+
+A firmware built with `cmake -DPM_SBDSP_IOLOG=1` records what a program does with the emulated
+Sound Blaster. The log goes to the `sbiolog.txt` at the root of the SD card, rewritten at each power
+on.
+
+The log holds the port reads and writes, the DMA controller (8237) writes, the DSP DMA starts and
+the Sound Blaster IRQs with the line they use. Each entry has a time stamp in µs.
+
+The file is written after the program is quiet for 0.5s, so wait a moment before switching off. The
+log uses 24KB of RAM, and its SD card writes can briefly disturb the audio.
+
+---
+
+*The original PicoMEM documentation follows.*
+
 # ISA PicoMEM Extension board (For 8086/8088 PC)
 
 **PicoMEM 1.14:**<br />

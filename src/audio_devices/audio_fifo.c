@@ -186,6 +186,14 @@ bool afifo_take_sample8(audio_fifo_8_t *fifo, int8_t *sample) {
 #endif    
 }
 
+// Drops up to num_samples from the FIFO, also when it is stopped. Must be called by the consumer.
+void afifo_drop8(audio_fifo_8_t *fifo, uint32_t num_samples) {
+    uint32_t n = MIN(fifo->samples_received - fifo->samples_sent, num_samples);
+    fifo->read_idx = (fifo->read_idx + n) & (AUDIO_FIFO_BITS);
+    fifo->samples_sent += n;
+    if ((fifo->samples_received - fifo->samples_sent) == 0) fifo->state = FIFO_STATE_STOPPED;
+}
+
 // 8Bit Stereo FIFO functions
 
 // Initialize the FIFO (called by producer_init or directly by user)

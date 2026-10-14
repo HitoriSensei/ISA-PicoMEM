@@ -10,12 +10,12 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License along with this program. 
+You should have received a copy of the GNU General Public License along with this program.
 If not, see <https://www.gnu.org/licenses/>.
 */
-/* ISA PicoMEM By Freddy VETELE	
+/* ISA PicoMEM By Freddy VETELE
  * picomem.cpp : Contains the Main initialisazion, ISA Bus Cycles management and commands executed by the Pi Pico
- */ 
+ */
 
  #include <sys/time.h>
  #include <time.h>
@@ -66,7 +66,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #include "hardware/structs/clocks.h"
 
 //SDCARD and File system definitions
-#include "hw_config.h"  /* The SDCARD and SPI definitions */	
+#include "hw_config.h"  /* The SDCARD and SPI definitions */
 #include "f_util.h"
 #include "ff.h"
 #include "sd_card.h"
@@ -155,9 +155,41 @@ void dev_audiomix_resume() {}
 #if USE_NE2000
 extern "C" {
 #include "ne2000/dev_ne2000.h"
+#if PM_HTTP
+#include "httpd/pm_httpd.h"
+#endif
 extern wifi_infos_t PM_Wifi;
 }
 #endif
+#endif
+
+#if PM_FWUPDATE
+#include "fwupdate/pm_fwupdate.h"
+#endif
+#include "sbdsp/sbdsp_iolog.h"
+
+extern uint16_t PM_CfgAdlibPort;     // Adlib port from the config.txt (pm_disk.cpp)
+extern uint16_t PM_CfgMPUPort;       // MPU port from the config.txt, or CFG_PORT_UNSET (pm_disk.cpp)
+extern uint16_t PM_CfgCVXPort;       // Covox or Disney port from the config.txt, or CFG_PORT_UNSET (pm_disk.cpp)
+extern bool     PM_CfgCVXDisney;
+#if USE_GUS
+extern uint16_t PM_CfgGUSPort;       // GUS port from the config.txt, 0 when Off (pm_disk.cpp)
+extern uint8_t  PM_CfgGUSIRQ;
+extern uint8_t  PM_CfgGUSDMA;
+#endif
+#if USE_SBDSP
+extern uint16_t PM_CfgSBPort;        // Sound Blaster port from the config.txt, 0 when Off (pm_disk.cpp)
+extern uint8_t  PM_CfgSBIRQ;
+extern uint8_t  PM_CfgSBDMA;
+extern bool     PM_CfgSBOPL;
+extern uint8_t  PM_CfgSBType;
+#endif
+#if USE_AUDIO
+extern bool bl_set_mode(uint8_t mode);   // Sets the output filter of the SB, Covox and Disney (bl_filter.cpp)
+#endif
+#if USE_HWIRQ
+extern uint8_t PM_CfgIRQ;           // PicoMEM IRQ from the config.txt (pm_disk.cpp)
+static bool PM_IRQDetectEnd=false;  // The next CMD_IRQAck ends the BIOS IRQ detection
 #endif
 
 #if USE_USBHOST
@@ -195,7 +227,7 @@ CFG_TUSB_MEM_SECTION static char serial_in_buffer[64] = { 0 };
 //***********************************************
 //*              PicoMEM Variables              *
 //***********************************************
-							
+
 #define DEV_POST_Enable 1
 
 bool PM_Init_Completed=false;
@@ -214,7 +246,7 @@ volatile uint8_t PM_TestWrite;
          uint8_t PM_TestRAMVal;
 
 uint8_t PM_Int13h_LEDCount=0;     // Count the number of Int13h calls to blink the LED during Disk access
-        
+
 // USB Host variables
 
 bool USB_Host_Enabled=false;	// True if USB Host mode is enabled
@@ -249,17 +281,20 @@ uint8_t  SD_Freq=20;
 // ***** Audio On / On Code  *****
 // *******************************
 #if USE_AUDIO
-void PM_Adlib_OnOff(uint16_t state)
+// Turns the Adlib Off (0), On at 388h (1) or On at a port. Returns 0 if ok.
+uint8_t PM_Adlib_OnOff(uint16_t state)
 {
  if (state)
      {
-      PM_INFO(">Adlib On\n");      
-      dev_adlib_install();           // Will not reinstall if already installed
+      if (state==1) state=0x388;    // Default Adlib port
+      PM_INFO(">Adlib On %x\n",state);
+      return dev_adlib_install(state);  // Will not reinstall if already installed there
      }
      else
      {
       PM_INFO(">Adlib Off\n");
       dev_adlib_remove();
+      return 0;
      }
 
 } //PM_Adlib_OnOff
@@ -276,7 +311,7 @@ uint8_t PM_CMS_OnOff(uint16_t state)
      }
      else
      {
-       PM_INFO(">CMS Off\n");      
+       PM_INFO(">CMS Off\n");
        dev_cms_remove();
        return 0;
      }
@@ -288,13 +323,13 @@ uint8_t PM_TDY_OnOff(uint16_t state)
  if (state)
      {
       if (state==1) state=0x2C0;    // Default Tandy Port
-      PM_INFO(">Tandy On %x\n",state);      
+      PM_INFO(">Tandy On %x\n",state);
       return dev_tdy_install(state);
      }
      else
      {
       dev_tdy_remove();
-      PM_INFO(">Tandy Off\n");        
+      PM_INFO(">Tandy Off\n");
       return 0;
      }
 } //PM_TDY_OnOff
@@ -305,7 +340,7 @@ uint8_t PM_MMB_OnOff(uint16_t state)
  if (state)
      {
       if (state==1) state=0x300;    // Default mindscape Port
-      PM_INFO(">Mindscape On %x\n",state);      
+      PM_INFO(">Mindscape On %x\n",state);
       return dev_mmb_install(state);
      }
      else
@@ -353,7 +388,7 @@ uint8_t PM_DSS_OnOff(uint16_t state)
      }
 } //PM_DSS_OnOff
 
-#if USE_SBDSP  
+#if USE_SBDSP
 // Return 0 When Ok
 uint8_t PM_sbdsp_OnOff(uint16_t state)
 {
@@ -364,7 +399,11 @@ uint8_t PM_sbdsp_OnOff(uint16_t state)
       if (state==1) state=0x220;    // Default SB DSP port
       PM_INFO(">SB DSP On %x\n",state);
       res=dev_sbdsp_install(state);
-      if (!res) dev_adlib_install();  // If SB DSP is installed, Add Adlib
+      if (!res)
+        {                         // Adds the FM ports and the AdLib of the SB
+         dev_sbopl_install();
+         dev_adlib_install(dev_adlib.port);   // Last Adlib port
+        }
       return res;
      }
      else
@@ -374,12 +413,53 @@ uint8_t PM_sbdsp_OnOff(uint16_t state)
       return 0;
      }
 } //PM_sbdsp_OnOff
+
+// Turns the Sound Blaster FM ports (base+8/+9) On or Off. Needs the SB DSP installed. Returns 0 if ok.
+uint8_t PM_sbopl_OnOff(uint16_t state)
+{
+ if (state)
+     {
+      if (!dev_sbdsp_installed()) return CMDERR_NOTSUPP;
+      PM_INFO(">SB OPL On\n");
+      dev_sbopl_install();
+     }
+     else
+     {
+      PM_INFO(">SB OPL Off\n");
+      dev_sbopl_remove();
+     }
+ return 0;
+} //PM_sbopl_OnOff
+
+// Installs the Sound Blaster from the config.txt, like PMINIT /sb 1
+static void PM_sbdsp_Config()
+{
+ if (BV_IRQ==0)
+   {
+    PM_ERROR("config.txt SB: no PicoMEM IRQ (the PicoMEM BIOS is needed)\n");
+    return;
+   }
+#if USE_HWIRQ
+ if (!((BV_HWIRQ>>PM_CfgSBIRQ)&1))
+    PM_WARNING("config.txt SB: IRQ %d not jumpered (%X)\n",PM_CfgSBIRQ,BV_HWIRQ);
+#endif
+ if (dev_sbdsp_set_irq_dma(PM_CfgSBIRQ,PM_CfgSBDMA)) return;   // Fails on the PicoMEM IRQ (logged)
+ dev_sbdsp_set_type(PM_CfgSBType);
+ uint8_t res=PM_sbdsp_OnOff(PM_CfgSBPort);
+ if (res)
+   {
+    PM_ERROR("config.txt SB %X: install error %d\n",PM_CfgSBPort,res);
+    return;
+   }
+ if (!PM_CfgSBOPL) PM_sbopl_OnOff(0);
+ if (!PM_Config->Adlib) PM_Adlib_OnOff(0);   // Removes the Adlib added by the SB when the Adlib is Off
+} //PM_sbdsp_Config
 #endif //USE_SBDSP
 
 // Return 0 When Ok
 uint8_t PM_gus_OnOff(uint16_t state)
 {
-#if USE_GUS  
+#if USE_GUS
  uint8_t res;
  //PM_INFO ("-PM_sbdsp_OnOff %x",state);
  if (state)
@@ -398,7 +478,7 @@ uint8_t PM_gus_OnOff(uint16_t state)
 #else
   PM_INFO(">GUS Not Supported in this build\n");
   return 1;
-#endif  
+#endif
 } //PM_gus_OnOff
 
 // Return 0 When Ok
@@ -419,8 +499,8 @@ uint8_t PM_MPU_OnOff(uint8_t type, uint16_t state)
      }
 #else
   PM_INFO(">MPU Not Supported in this build\n");
-  return 1; 
-#endif     
+  return 1;
+#endif
 } //PM_MPU_OnOff
 
 
@@ -432,19 +512,38 @@ void PM_Audio_OnOff(uint8_t state)
   if (state)
     {
      // PM_Config->MMBPort=0x300;
-      PM_Adlib_OnOff(PM_Config->Adlib);
+      PM_Adlib_OnOff(PM_Config->Adlib ? PM_CfgAdlibPort : 0);   // config.txt ADLIB 0 / 1 / port
       PM_CMS_OnOff(PM_Config->CMSPort);
       PM_TDY_OnOff(PM_Config->TDYPort);
       PM_MMB_OnOff(PM_Config->MMBPort);
-//      PM_CVX_OnOff(0);  //Off by default (Configured by PMInit)
-#if USE_SBDSP      
+      if (PM_CfgCVXPort!=CFG_PORT_UNSET)   // config.txt CVX / DSS. Without them the Covox stays as PMINIT set it.
+        {
+         dev_cvx_remove();
+         if (PM_CfgCVXPort)
+           {
+            uint8_t res=dev_cvx_install(PM_CfgCVXDisney ? CVX_TYPE_DISNEY : CVX_TYPE_DAC,PM_CfgCVXPort);
+            if (res) PM_ERROR("config.txt CVX/DSS %X: install error %d\n",PM_CfgCVXPort,res);
+           }
+        }
+#if USE_SBDSP
       PM_sbdsp_OnOff(0);          // Set SB Off by default
+      if (PM_CfgSBPort) PM_sbdsp_Config();   // config.txt SB
 #endif
 #if USE_GUS
       PM_gus_OnOff(0);            // Set GUS Off by default
-#endif      
-#if USE_MPU // Don't stop MPU at reboot for the moment
-    //  dev_mpu_install(0x330);
+      if (PM_CfgGUSPort)          // config.txt GUS, like PMINIT /gus 1
+        {
+         uint8_t res=PM_gus_OnOff(PM_CfgGUSPort);
+         if (!res) res=dev_gus_set_irq_dma(PM_CfgGUSIRQ,PM_CfgGUSDMA);
+         if (res) PM_ERROR("config.txt GUS %X: install error %d\n",PM_CfgGUSPort,res);
+        }
+#endif
+#if USE_MPU // Without a config.txt MPU line, the MPU is not stopped at reboot
+      if (PM_CfgMPUPort!=CFG_PORT_UNSET)
+        {
+         uint8_t res=PM_MPU_OnOff(0,PM_CfgMPUPort);    // config.txt MPU 0 / 1 / port
+         if (res) PM_ERROR("config.txt MPU %X: install error %d\n",PM_CfgMPUPort,res);
+        }
 #endif
 #if I2S_QWIIC_SHARES // When I2S and QwiiC are shared, Stop all QwiiC access when Audio is ON
 #else
@@ -458,13 +557,13 @@ void PM_Audio_OnOff(uint8_t state)
       PM_CMS_OnOff(0);
       PM_TDY_OnOff(0);
       PM_MMB_OnOff(0);
-#if USE_SBDSP    
+#if USE_SBDSP
       PM_sbdsp_OnOff(0);
 #endif
       PM_gus_OnOff(0);
      // dev_audiomix_stop();  // Does not work, can't reenable after :(
     }
-}    
+}
 #endif
 
 // PM_Joystick_OnOff : Enable/Disable the Joystick
@@ -477,17 +576,17 @@ bool PM_Joystick_OnOff(uint8_t state)
     {
      if (USB_Host_Enabled)
       {
-       PM_INFO(">Enable Joystick\n");        
+       PM_INFO(">Enable Joystick\n");
        dev_joystick_install();
        return true;
       }
       else return false;
     }
-    else 
+    else
     {
       PM_INFO(">Disable Joystick\n");
       dev_joystick_remove();
-      return true;      
+      return true;
      }
 }
 #endif
@@ -505,7 +604,7 @@ bool PM_RTC_OnOff(uint8_t state)
     {
       PM_INFO(">Disable RTC\n");
       dev_rtc_remove();
-      return true;      
+      return true;
      }
 }
 #endif
@@ -526,33 +625,33 @@ void PM_ExecCMD()
     PM_CmdReset=false;      // Disable the Reset (It is completed)
     PM_Status=STAT_READY;
     break;
-    
+
    case CMD_SetBasePort :   // CMD 2: Set the board base port !! To do !!
     PM_INFO("SetBasePort\n");
     PM_Status=STAT_READY;
     break;
-    
+
    case CMD_GetMEMType :    // CMD 5: Get the Memory Type (16K Block)
     if (PM_CmdDataL<64) {PM_CmdDataH=GetMEMType(PM_CmdDataL<<14); } //MEM_Index_T[PM_CmdDataL^(0xF0000>>14)];
        else {PM_CmdDataH=0;}
     PM_Status=STAT_READY;
     break;
-    
+
    case CMD_SetMEMType :    // CMD 6: Set the Memory Type (16K Block)
     if (PM_CmdDataL<64)     // Used to perform emulation RAM Test (MEM MAP and Diag)
        {
         uint32_t Addr=PM_CmdDataL<<14;
         PM_INFO("A:%x T:%x %x ",PM_CmdDataL,PM_CmdDataH,Addr);
 
-        if (PM_CmdDataH==MEM_RAM) 
+        if (PM_CmdDataH==MEM_RAM)
            {
             PM_Memory[0]=0x13;      // ID at the begining of the RAM, for the detection
             PM_Memory[0]=0x12;
             RAM_InitialAddress=Addr;
-            RAM_Offset_Table[MEM_RAM]=&PM_Memory[-RAM_InitialAddress];            
+            RAM_Offset_Table[MEM_RAM]=&PM_Memory[-RAM_InitialAddress];
            }
         SetMEMType(Addr,PM_CmdDataH,MEM_S_16k);  // Define a 16Kb RAM Block 44
-        SetMEMIndex(Addr,PM_CmdDataH,MEM_S_16k);           
+        SetMEMIndex(Addr,PM_CmdDataH,MEM_S_16k);
        }
     PM_Status=STAT_READY;
     break;
@@ -571,11 +670,11 @@ void PM_ExecCMD()
     PM_INFO("Tandy RAM : %dx16Kb\n",BV_TdyRAM);
     uint8_t PC_RamSize_Bloc;
     PC_RamSize_Bloc=(PC_MEM+256*PC_MEM_H)/16;  //Compute the Number of 16 Kb Bloc RAM on the PC
-    
+
     if ((PC_RamSize_Bloc+BV_TdyRAM)>40)
        {
         PM_INFO("Err, Too many RAM, Adjust size %d\n",PC_RamSize_Bloc+BV_TdyRAM);
-        BV_TdyRAM=40-PC_RamSize_Bloc;        
+        BV_TdyRAM=40-PC_RamSize_Bloc;
        }
 
      if (BV_TdyRAM!=0)
@@ -596,8 +695,8 @@ void PM_ExecCMD()
 
 #if USE_SPI_PSRAM
      if (BV_TdyRAM>MAX_PMRAM) // Then PSRAM
-        {  // Add Tandy RAM as PSRAM From the Address MAX_PMRAM*+16KB, size (BV_TdyRAM-MAX_PMRAM)*16KB  
-          PM_INFO("Add %dx16K PSRAM, Addr %x \n",BV_TdyRAM-MAX_PMRAM,MAX_PMRAM<<14);     
+        {  // Add Tandy RAM as PSRAM From the Address MAX_PMRAM*+16KB, size (BV_TdyRAM-MAX_PMRAM)*16KB
+          PM_INFO("Add %dx16K PSRAM, Addr %x \n",BV_TdyRAM-MAX_PMRAM,MAX_PMRAM<<14);
           uint32_t MEM_Addr=MAX_PMRAM<<14;  // Shift 14 for 16Kb Block
           SetMEMType(MEM_Addr,MEM_PSRAM,MEM_S_16k*(BV_TdyRAM-MAX_PMRAM));
           SetMEMIndex(MEM_Addr,MEM_PSRAM,MEM_S_16k*(BV_TdyRAM-MAX_PMRAM));
@@ -618,13 +717,13 @@ void PM_ExecCMD()
 #if PM_PRINTF
     PM_INFO("Mem Type: ");
     for (int i=0;i<MEM_T_Size;i++)
-        { if (i==10*8) PM_INFO("- "); 
+        { if (i==10*8) PM_INFO("- ");
           PM_INFO("%d ",GetMEMType(i*8*1024));
         }
 
     PM_INFO("Mem Index: ");
     for (int i=0;i<MEM_T_Size;i++)
-        { if (i==10*8) PM_INFO("- "); 
+        { if (i==10*8) PM_INFO("- ");
           PM_INFO("%d ",GetMEMIndex(i*8*1024));
         }
 #endif
@@ -653,19 +752,19 @@ void PM_ExecCMD()
    case CMD_SaveCfg :       // CMD: Save the Configuration to the uSD
      PM_CmdDataL=0;
      PM_INFO("Save Config to CF\n");
- 
+
      if (PM_EnableSD())
-      { 
-        dev_audiomix_pause();     // Need to pause audio during uSD Access         
+      {
+        dev_audiomix_pause();     // Need to pause audio during uSD Access
         uint8_t SC_return=pm_SaveConfig();
-        dev_audiomix_resume();         
+        dev_audiomix_resume();
         if (SC_return!=0)
            {
-            PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation     
+            PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation
             PM_ERROR("Save Config Error %d\n",SC_return);
-     
-            PM_CmdDataL=SC_return;   // Return an error code          
-            PM_Status=STAT_CMDERROR;         
+
+            PM_CmdDataL=SC_return;   // Return an error code
+            PM_Status=STAT_CMDERROR;
             break;
            }
       }
@@ -685,9 +784,9 @@ void PM_ExecCMD()
 
 // DMA registers capture/Emulation installation
 #if !USE_HWDMA
-     dev_dma_install();     
+     dev_dma_install();
      bool dma_ok;
-     dma_ok=true;     
+     dma_ok=true;
      // Add code to test if DMA can be interrupted
      PM_INFO("DMA register capture test: ");
      PC_SetDMARegs(1,0xFFFF,0xFFFF,0);
@@ -696,7 +795,7 @@ void PM_ExecCMD()
      PC_SetDMARegs(1,0,0,0);
   //   PM_INFO("Virtual DMA: Offset: %x Size: %x\n",dmachregs[1].baseaddr, dmachregs[1].basecnt);
      if ((dmachregs[1].baseaddr!=0)|(dmachregs[1].baseaddr!=0)) dma_ok=false;
-    
+
      if (!dma_ok)
         {
          PM_ERROR("Ko > Disable !\n");
@@ -717,7 +816,7 @@ void PM_ExecCMD()
 #endif
 
 #if PM_WIFI
-#if USE_NE2000 
+#if USE_NE2000
       DelPortType(DEV_NE2000);                            // Remove the ne2000 Ports
       if ((PM_Config->ne2000Port!=0)&&(PM_Config->ne2000Port<0x3E0))
         {
@@ -745,15 +844,15 @@ void PM_ExecCMD()
       for (int shft=0;shft<8;shft++)
           { if ((BV_HWIRQ>>shft) & 1) PM_INFO(" %d",shft); }
       PM_INFO("\n");
-      PC_End();     // Tell the PC Command loop to end      
+      PC_End();     // Tell the PC Command loop to end
       PM_Status=STAT_READY;
       break;
 
-   case CMD_GetPMString : 
+   case CMD_GetPMString :
 
     PM_Status=STAT_READY;
     break;
-    
+
    case CMD_SetMEM :        // CMD: 22 SET 64K of memory to the value
  //    PM_INFO("SETMEM %x ",PM_SetRAMVal);
      //setmem()
@@ -769,14 +868,14 @@ void PM_ExecCMD()
      PM_TestRAMVal=PM_CmdDataL;
      for (uint32_t i=0 ; i<65536 ; ++i)
          {
-          if ((PM_Memory[i])!=PM_TestRAMVal) 
+          if ((PM_Memory[i])!=PM_TestRAMVal)
              {
               PM_Status=STAT_CMDERROR;
               break;
              }
          ;}
      PM_Status=STAT_READY;
-     break; 
+     break;
 
    case CMD_SendIRQ :      // Will Fire all the Interrupts one after the other for IRQ Detection
      PM_INFO("CMD_SendIRQ\n");
@@ -802,7 +901,7 @@ void PM_ExecCMD()
      gpio_put(PIN_IRQ6,0);   // Move the needed IRQ Up
      busy_wait_ms(2);        // Keep the IRQ high for 2ms
      gpio_put(PIN_IRQ6,1);   // Put back the IRQ Down
-     busy_wait_ms(2);        // Wait a bit before the next IRQ       
+     busy_wait_ms(2);        // Wait a bit before the next IRQ
 #endif
      gpio_put(PIN_IRQ7,1);   // IRQ Down (Force if the IRQ was not acknowledge (IRQ masked))
      busy_wait_us(5);
@@ -817,16 +916,28 @@ void PM_ExecCMD()
      gpio_put(PIN_PM_IRQ,0);   // Move the needed IRQ Up
      busy_wait_ms(2);          // Keep the IRQ high for 2ms
      gpio_put(PIN_PM_IRQ,1);   // Put back the IRQ Down
-#endif 
+#endif
 #endif
      busy_wait_ms(20);       // Wait a little more at the end
      PM_INFO("IRQ Detected: %d Mask %X\n",BV_IRQ,BV_HWIRQ);
+#if USE_HWIRQ
+     PM_IRQDetectEnd=true;
+#endif
      PM_Status=STAT_READY;
      break;
 
    case CMD_IRQAck :       // CMD: Acknowledge IRQ
      PM_INFO("CMD_IRQAck\n");
      SVAR_IRQ->PM_IRR=0;
+#if USE_HWIRQ
+     // Ends the BIOS IRQ detection. The config.txt IRQ replaces the BIOS choice when its jumper was found.
+     if (PM_IRQDetectEnd)
+        {
+         PM_IRQDetectEnd=false;
+         if (PM_CfgIRQ && ((BV_HWIRQ>>PM_CfgIRQ)&1)) BV_IRQ=PM_CfgIRQ;
+         PM_INFO("PicoMEM IRQ: %d (config %d, jumpers %X)\n",BV_IRQ,PM_CfgIRQ,BV_HWIRQ);
+        }
+#endif
      PM_Status=STAT_READY;
      break;
 
@@ -835,15 +946,15 @@ void PM_ExecCMD()
    case CMD_USB_Enable :    // CMD: 0x50
 
       PM_INFO("Enable USB\n");
-   
-      PM_CmdDataL=PM_StartUSB();    
+
+      PM_CmdDataL=PM_StartUSB();
       PM_Status=STAT_READY;
      break;
 
    case CMD_USB_Disable :     // CMD: 0x51
 
       PM_INFO("Disable USB\n");
-   
+
       PM_StopUSB();  // Does not readdy Stop the USB, but Block the USB Devices IRQ : To Correct (If possible)
       PM_CmdDataL=0;
       PM_Status=STAT_READY;
@@ -852,7 +963,7 @@ void PM_ExecCMD()
    case CMD_Mouse_Enable :    // CMD: 0x52
 
       PM_INFO("Enable Mouse\n");
-   
+
       MOUSE_Enabled=true;
       PM_CmdDataL=0;
       PM_Status=STAT_READY;
@@ -869,7 +980,7 @@ void PM_ExecCMD()
    case CMD_Keyb_OnOff :     // CMD: 0x54
 
       PM_INFO("Keyboard : ");
-      if (PM_CmdDataL) 
+      if (PM_CmdDataL)
          {
           KEYB_Enabled=true;
           PM_INFO("On\n");
@@ -881,23 +992,23 @@ void PM_ExecCMD()
          }
       PM_CmdDataL=0;
       PM_Status=STAT_READY;
-     break;  
+     break;
 
    case CMD_Joy_OnOff:        // USB Joystick : 0: Off 1: on
-      uint16_t arg;   
+      uint16_t arg;
 #if USE_USBHOST
       arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
       PM_INFO("%X",arg);
-      PM_CmdDataL=PM_Joystick_OnOff(arg);  
+      PM_CmdDataL=PM_Joystick_OnOff(arg);
       PM_CmdDataH=0;
 #else
       PM_INFO("Joystick Not Supported in this build\n");
       PM_CmdDataL=1;  // Return an error
       PM_CmdDataH=0;
-#endif      
-      PM_Status=STAT_READY;      
+#endif
+      PM_Status=STAT_READY;
      break;
-	 
+
    case CMD_Wifi_Infos	:   // CMD: 0x60  Get the Wifi Status, retry to connect if not connected
 #if PM_WIFI
 #if USE_NE2000
@@ -911,7 +1022,7 @@ void PM_ExecCMD()
           }
        }
 
-      memcpy((void *)&PCCR_Param,&PM_Wifi,sizeof(PM_Wifi));    
+      memcpy((void *)&PCCR_Param,&PM_Wifi,sizeof(PM_Wifi));
 
       PM_INFO("Wifi Info: Port %x IRQ %d",PM_Config->ne2000Port,PM_Config->ne2000IRQ);
       PM_INFO(" SSID %s \n",PM_Wifi.WIFI_SSID);
@@ -926,12 +1037,12 @@ void PM_ExecCMD()
       str_tmp=(char *) &PCCR_Param;
       uint8_t usbnb;
 
-#if USE_USBHOST   
+#if USE_USBHOST
       usb_print_status();
       if ((PM_Config->EnableUSB)==1)
         {
          usbnb=usb_get_devnb();
-    
+
          str_tmp[0]=usbnb+1;  // Nb of Lines to display
          str_tmp++;
          sprintf(str_tmp,"   USB  : %d device%c", usbnb, usbnb == 1 ? ' ' : 's');
@@ -948,13 +1059,13 @@ void PM_ExecCMD()
                str_tmp+=strlen(str_tmp)+1;   // Move pointer at the end of the current string
               }
         }
-        else 
+        else
         {
          str_tmp[0]=0;
         }
-#else 
+#else
       str_tmp[0]=0;
-#endif      
+#endif
       PM_Status=STAT_READY;
      break;
 
@@ -974,9 +1085,9 @@ void PM_ExecCMD()
            //PM_INFO("Attr%x",PM_Config->FDD_Attribute[i]);
            if ((PM_Config->FDD_Attribute[i]>=0x80))
             {
-             // Generate the FDD info string              
+             // Generate the FDD info string
              sprintf(str_tmp,"   FDD%d : %-13s  [%4dKB]",i,PM_Config->FDD[i].name,PM_Config->FDD[i].size);
-             PM_INFO("%s\n",str_tmp);             
+             PM_INFO("%s\n",str_tmp);
              str_tmp[1]=0xFE;         // Add the special character
              usbnb=strlen(str_tmp);
              str_tmp+=usbnb+1;        // Move pointer at the end of the current string
@@ -1006,12 +1117,12 @@ void PM_ExecCMD()
 
    case CMD_AudioOnOff:     // Full audio rendering 0: Off 1:On
       PM_Audio_OnOff(PM_CmdDataL);
-      PM_Status=STAT_READY;      
+      PM_Status=STAT_READY;
      break;
 
-   case CMD_AdlibOnOff:      // Adlib Audio : 0 : Off 1: On default
-      arg=(uint16_t)PM_CmdDataL;   
-      PM_INFO("Adlib OnOff: %x\n",arg);  
+   case CMD_AdlibOnOff:      // Adlib Audio : 0 : Off 1: On default (388h) or port, return install status
+      arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
+      PM_INFO("Adlib OnOff: %x\n",arg);
       if (arg)
        { // If enable device, start audio mix
 #if I2S_QWIIC_SHARES // When I2S and QwiiC are shared, Stop all QwiiC access when Audio is ON
@@ -1019,9 +1130,8 @@ void PM_ExecCMD()
         qwiic_4charLCD_enabled=false;    // Stop Qwiic when audio is active
 #endif
         dev_audiomix_start();            // Start Audio if not on
-       }   
-      PM_Adlib_OnOff(arg);
-      PM_CmdDataL=0;
+       }
+      PM_CmdDataL=PM_Adlib_OnOff(arg);
       PM_CmdDataH=0;
       PM_Status=STAT_READY;
      break;
@@ -1037,14 +1147,14 @@ void PM_ExecCMD()
 #endif
         dev_audiomix_start();            // Start Audio if not on
        }
-      PM_CmdDataL=PM_TDY_OnOff(arg);     
+      PM_CmdDataL=PM_TDY_OnOff(arg);
       PM_CmdDataH=0;
-      PM_Status=STAT_READY;      
+      PM_Status=STAT_READY;
      break;
 
    case CMD_CMSOnOff:        // CMS Audio   : 0 : Off 1: On default or port, return install status
       arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
-      PM_INFO("CMS OnOff: %x\n",arg);      
+      PM_INFO("CMS OnOff: %x\n",arg);
       if (arg)
        { // If enable device, start audio mix
 #if I2S_QWIIC_SHARES // When I2S and QwiiC are shared, Stop all QwiiC access when Audio is ON
@@ -1055,7 +1165,7 @@ void PM_ExecCMD()
        }
       PM_CmdDataL=PM_CMS_OnOff(arg);
       PM_CmdDataH=0;
-      PM_Status=STAT_READY;      
+      PM_Status=STAT_READY;
      break;
 
    case CMD_MMBOnOff:        // MMB Audio   : 0 : Off 1: On default or port, return install status
@@ -1074,10 +1184,42 @@ void PM_ExecCMD()
       PM_Status=STAT_READY;
      break;
 
+   case CMD_SBOPLOnOff:     // Sound Blaster FM ports (base+8/+9) : 0 : Off 1: On (SB DSP needed)
+   #if USE_SBDSP
+      PM_INFO("SB OPL OnOff: %x\n",PM_CmdDataL);
+      PM_CmdDataL=PM_sbopl_OnOff(PM_CmdDataL);
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
+   case CMD_FilterMode:     // Output filter of the SB, Covox and Disney : 0 none 1 SB16 2 SB Pro 2 3 analog stage
+   #if USE_AUDIO
+      PM_INFO("Filter mode: %x\n",PM_CmdDataL);
+      PM_CmdDataL=bl_set_mode(PM_CmdDataL) ? 0 : CMDERR_NOTSUPP;
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
+   case CMD_SetSBType:      // Sound Blaster type as the BLASTER T value : 3 SB 2.0, 2 or 4 SB Pro 2
+   #if USE_SBDSP
+      PM_CmdDataL=dev_sbdsp_set_type(PM_CmdDataL);
+   #else
+      PM_CmdDataL=CMDERR_NOTSUPP;
+   #endif
+      PM_CmdDataH=0;
+      PM_Status=STAT_READY;
+     break;
+
    case CMD_SetSBIRQDMA:        // GUS Audio   : 0 : Off 1: On default or port
       PM_CmdDataL=dev_sbdsp_set_irq_dma((uint16_t)PM_CmdDataL,(uint16_t)PM_CmdDataH);
       PM_CmdDataH=0;
-      PM_Status=STAT_READY;      
+      PM_Status=STAT_READY;
      break;
 
    case CMD_SBOnOff:        // Sound Blaster Audio : 0 : Off 1: On default or port  !! Need to add IRQ
@@ -1087,7 +1229,7 @@ void PM_ExecCMD()
           PM_ERROR("Can't start Sound Blaster, no IRQ detected !\n");
           PM_CmdDataL=CMDERR_NOIRQ;  // Error, no IRQ detected
           PM_CmdDataH=0;
-          PM_Status=STAT_READY;      
+          PM_Status=STAT_READY;
           break;
         }
       arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
@@ -1123,7 +1265,7 @@ void PM_ExecCMD()
       break;
 
    case CMD_GUSOnOff:        // Gravis Audio : 0 : Off 1: On default or port  !! Need to add IRQ
-#if USE_GUS   
+#if USE_GUS
       arg=((uint16_t)PM_CmdDataH<<8)+(uint16_t)PM_CmdDataL;
       PM_INFO("GUS OnOff: %x (%x %X)\n",arg,PM_CmdDataH,PM_CmdDataL);
       if (arg)
@@ -1139,9 +1281,9 @@ void PM_ExecCMD()
 #else
       PM_CmdDataL=1;  // Error, GUS not supported
       PM_CmdDataH=0;
-#endif      
+#endif
       PM_Status=STAT_READY;
-      break;  
+      break;
 
    case CMD_CVXOnOff:        // MMB Audio   : 0 : Off 1: On default or port, return install status
       arg=((uint16_t)(PM_CmdDataH&0x03)<<8)+(uint16_t)PM_CmdDataL;
@@ -1171,13 +1313,13 @@ void PM_ExecCMD()
        }
       PM_CmdDataL=PM_MPU_OnOff(PM_CmdDataH>>2,arg);
       PM_Status=STAT_READY;
-     break;    
+     break;
 
 // *** Disk Commands  0x8x ***
    case CMD_HDD_Getlist :  // CMD: Get the list of HDD images
       uint8_t nb;
       //PM_INFO("GetDirList: %d %d\n",PM_CmdDataL, PM_CmdDataH);
-      if (PM_CmdDataL==0) 
+      if (PM_CmdDataL==0)
          { // Get the list from Home folder
           pm_disk_InitSearchPath();
          }
@@ -1188,11 +1330,11 @@ void PM_ExecCMD()
          }
       PM_CmdDataL=ListImages(1,&nb,(FSizeName_t *) &PCCR_Param);
       PM_PICO_EnablePSRAM();    // Re enable the PSRAM for the Memory emulation
-      PM_Status=STAT_READY;    
+      PM_Status=STAT_READY;
      break;
 
    case CMD_FDD_Getlist :  // CMD: Get the list of FDD images
-      if (PM_CmdDataL==0) 
+      if (PM_CmdDataL==0)
          { // Get the list from Home folder
           pm_disk_InitSearchPath();
          }
@@ -1200,20 +1342,20 @@ void PM_ExecCMD()
          { // Get the list, folder change
            PM_INFO("Load FDD, Change DIR %d\n",PM_CmdDataH);
            pm_disk_UpdateSearchPath(PM_CmdDataH, (FSizeName_t *) &PCCR_Param);
-         }   
+         }
       PM_CmdDataL=ListImages(0,&nb,(FSizeName_t *) &PCCR_Param);
-      PM_PICO_EnablePSRAM();    // Re enable the PSRAM for the Memory emulation      
-      PM_Status=STAT_READY;   
+      PM_PICO_EnablePSRAM();    // Re enable the PSRAM for the Memory emulation
+      PM_Status=STAT_READY;
      break;
 
    case CMD_HDD_Getinfos :  // CMD: Write the hdd infos in the Disk Memory buffer
-     
+
      // memcpy(PM_DP_RAM,defaultdiskname,strlen(defaultdiskname)+1);
      //memcpy(,&PCCR_Param,sizeof());
      PM_Status=STAT_READY;
      break;
-     
-    case CMD_HDD_Mount :  // CMD: Mount the HDD images  
+
+    case CMD_HDD_Mount :  // CMD: Mount the HDD images
      if (PM_EnableSD())
       {
        char imgpath[64+26];
@@ -1224,19 +1366,19 @@ void PM_ExecCMD()
            f_close(&HDDfile[i]);  // Close the previous HDD file
            PM_Config->HDD_Attribute[i]=i;
            if (imageDiskList[i+2]!=NULL)
-           { 
+           {
             delete imageDiskList[i+2];   // Delete the previous HDD Object
             imageDiskList[i+2]=NULL;
            }
         //Mount the disk image
            if ((PM_Config->HDD[i].size>>8)!=0xFE)
-            {        
+            {
             if (strcmp(PM_Config->HDD[i].name,""))  // Skip if disk name is empty
                { // Create the disk image Path string
                 //sprintf(imgpath, "1:/HDD/%s.img", PM_Config->HDD[i].name);
                 sprintf(imgpath, "0:/HDD/%s%s", PM_Config->HDDPath[i], PM_Config->HDD[i].name);
                 PM_INFO("HDD%d: %s\n",i,imgpath);
-              
+
                 int8_t mountres=pm_mounthddimage(imgpath,i+1);    // Mount the disk image
                 if (!mountres) PM_Config->HDD_Attribute[i]=0x80;  // res=0 > PicoMEM Disk
                }
@@ -1247,23 +1389,23 @@ void PM_ExecCMD()
             }
          }
       }
-     
+
      New_DiskNB=0;  // count the total number of HDD (To update the BIOS)
      for (int i=0;i<4;i++)
       {
         if (PM_Config->HDD_Attribute[i]>=0x80) New_DiskNB++;      // Image Mounted
-        if (PM_Config->HDD_Attribute[i]<PC_DiskNB) New_DiskNB++;  // Read existing Floppy        
+        if (PM_Config->HDD_Attribute[i]<PC_DiskNB) New_DiskNB++;  // Read existing Floppy
         PM_INFO(" - %s Attr:%x\n",PM_Config->HDD[i].name,PM_Config->HDD_Attribute[i]);
       }
      PM_INFO("Total HDD : %d / %d\n",New_DiskNB,PC_DiskNB);
 
      PM_INFO2("HDD Mount End\n");
-     PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation   
+     PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation
      PM_Status=STAT_READY;
      break;
 
-    case CMD_FDD_Mount :  // CMD: Mount the floppy images    
-     PM_INFO("FDD Mount\n");    
+    case CMD_FDD_Mount :  // CMD: Mount the floppy images
+     PM_INFO("FDD Mount\n");
 
      if (PM_EnableSD())
       {
@@ -1274,7 +1416,7 @@ void PM_ExecCMD()
 
      PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation
      PM_Status=STAT_READY;
-     break;  
+     break;
 
      case CMD_Image_Select :  // CMD: Select an image in the list (PM_CmdDataL: Image NB, PM_CmdDataH : 0-1 FDSD0-1 : 2-6 HDD0-3)
       PM_INFO("CMD_Image_Select: %d %d\n",PM_CmdDataH,PM_CmdDataL);
@@ -1282,25 +1424,25 @@ void PM_ExecCMD()
       PM_Status=STAT_READY;
      break;
 
-   case CMD_HDD_NewImage  :   // CMD:  
+   case CMD_HDD_NewImage  :   // CMD:
      PM_INFO("CMD_HDD_NewImage\n");
-     if (PM_EnableSD()) 
+     if (PM_EnableSD())
       {
-        uint8_t NI_return=NewHDDImage();   
+        uint8_t NI_return=NewHDDImage();
         if (NI_return!=0)
            {
             PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation
             PM_INFO("Error:%d\n",NI_return);
 
-            PM_CmdDataL=NI_return;   // Return an error code          
-            PM_Status=STAT_CMDERROR;         
+            PM_CmdDataL=NI_return;   // Return an error code
+            PM_Status=STAT_CMDERROR;
             break;
            }
       }
-      PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation      
-      PM_Status=STAT_READY;    
+      PM_PICO_EnablePSRAM();  // Re enable the PSRAM for the Memory emulation
+      PM_Status=STAT_READY;
      break;
-       
+
     case CMD_Int13h :  // Execute Int 13h, registers are passed via the BIOS Memory
      if (BV_PCCMD_SOURCE!=0)  // If the PC Command is running
         {
@@ -1310,16 +1452,16 @@ void PM_ExecCMD()
           reg_flagl=1;  // Set Carry (Bit 0)
           PM_Status=STAT_READY;
           break;
-         }    
+         }
 
      BV_PCCMD_SOURCE=1;
 
      //printf("i%d",BV_Int13hCLI);
 
-     if (PM_EnableSD()) 
+     if (PM_EnableSD())
       {
         if (PM_Int13h_LEDCount++==3) pm_led(1);  // Don't blink the LED all the time
-        INT13_DiskHandler();        
+        INT13_DiskHandler();
       }
        else
       {
@@ -1330,7 +1472,7 @@ void PM_ExecCMD()
 
      PM_PICO_EnablePSRAM();   // Re enable the PSRAM for the Memory emulation
 	   PC_End();                // Tell the PC Command loop to end
-  
+
      if (PM_Int13h_LEDCount==6) {
         pm_led(0);
         PM_Int13h_LEDCount=0;
@@ -1359,10 +1501,10 @@ void PM_ExecCMD()
        uint16_t Offset,Size;
 
        PM_INFO ("PCINFO Command\n");
-       
-       PC_Getpos(&X,&Y);  
+
+       PC_Getpos(&X,&Y);
        PC_printf("\r\nBIOS D : %d %d\r\n",X,Y);
-       
+
        PC_OUT8(0x80,0x12);
 
        PM_INFO("PicoMEM Test Port : ");
@@ -1382,7 +1524,7 @@ void PM_ExecCMD()
        PC_GetDMARegs(1,&Page,&Offset,&Size);
        PM_INFO("PC_GetDMARegs: Page:%X Offset: %X Size: %X\n",Page,Offset,Size);
        PM_INFO("Virtual DMA: Page:%X Offset: %X Size: %X\n",dmachregs[1].page, dmachregs[1].baseaddr, dmachregs[1].basecnt);
-       
+
        PM_INFO("PC_SetDMARegs: Offset: 0x1234 Size: 0x1000\n");
        PC_SetDMARegs(1,0x1234,0x1000,0);
 
@@ -1390,21 +1532,21 @@ void PM_ExecCMD()
        PM_INFO("PC_GetDMARegs: Page:%x Offset: %x Size: %x\n",Page,Offset,Size);
        PM_INFO("Virtual DMA: Page:%x Offset: %x Size: %x\n",dmachregs[1].page, dmachregs[1].baseaddr, dmachregs[1].basecnt);
 
-	     PC_End();            // Tell the PC Command loop to end      
+	     PC_End();            // Tell the PC Command loop to end
        PM_Status=STAT_READY;
      break;
 
      case CMD_BIOS_MENU :  // Take the control in a BIOS menu
         // PM_CmdDataL Menu, PM_CmdDataH SubMenu
         PM_INFO ("BIOS Menu %d Sub Menu %d\n",PM_CmdDataH,PM_CmdDataL);
-        
+
         pm_apps_biosmenu(PM_CmdDataH,PM_CmdDataL);
-        
+
         PC_End();     // Tell the PC Command loop to end
         PM_Status=STAT_READY;
       break;
 
-    case CMD_Int21h :         // Interrupt 21h "Spy"   
+    case CMD_Int21h :         // Interrupt 21h "Spy"
 
       if ((reg_ah==0x40) & (reg_bx==1))  // Skip write to screen
         {
@@ -1417,19 +1559,19 @@ void PM_ExecCMD()
        switch (reg_ah)
        {
        case 0x0D: PM_INFO(". DISK RESET (AH:%x)\n",reg_ah);
-                  break; 
+                  break;
        case 0x0E: PM_INFO(". SELECT DEFAULT DRIVE (AH:%x)\n",reg_ah);
-                  break;  
+                  break;
        case 0x0F: PM_INFO(". OPEN FILE USING FCB (AH:%x)\n",reg_ah);
-                  break;        
+                  break;
        case 0x10: PM_INFO(". CLOSE FILE USING FCB (AH:%x)\n",reg_ah);
                   break;
        case 0x11: PM_INFO(". FIND FIRST MATCHING FILE USING FCB (AH:%x)\n",reg_ah);
-                  break;          
+                  break;
        case 0x12: PM_INFO(". FIND NEXT MATCHING FILE USING FCB (AH:%x)\n",reg_ah);
-                  break;         
+                  break;
        case 0x13: PM_INFO(". DELETE FILE USING FCB (AH:%x)\n",reg_ah);
-                  break;        
+                  break;
        case 0x14: PM_INFO(". SEQUENTIAL READ FROM FCB FILE (AH:%x)\n",reg_ah);
                   break;
        case 0x15: PM_INFO(". SEQUENTIAL WRITE TO FCB FILE (AH:%X)\n",reg_ah);
@@ -1437,23 +1579,23 @@ void PM_ExecCMD()
        case 0x16: PM_INFO(". CREATE OR TRUNCATE FILE (AH:%X)\n",reg_ah);
                   break;
        case 0x17: PM_INFO(". EXTENDED RENAME FILE (AH:%x)\n",reg_ah);
-                  break; 
+                  break;
        case 0x18: PM_INFO(". EXTENDED RENAME FILE (AH:%x)\n",reg_ah);
-                  break;  
+                  break;
        case 0x19: PM_INFO(". GET CURRENT DEFAULT DRIVE (AH:%x)\n",reg_ah);
-                  break; 
+                  break;
        case 0x1A: PM_INFO(". SET DISK TRANSFER AREA ADDRESS (AH:%x)\n",reg_ah);
-                  break;                          
+                  break;
        case 0x23: PM_INFO(". GET FILE SIZE (AH:%x)\n",reg_ah);
                   break;
        case 0x25: PM_INFO(". SET INTERRUPT VECTOR (AH:%x)\n",reg_ah);
                   break;
        case 0x29: PM_INFO(". PARSE FILENAME INTO FCB (AH:%x)\n",reg_ah);
-                  break;                  
+                  break;
        case 0x2A: PM_INFO(". GET SYSTEM DATE (AH:%x)\n",reg_ah);
                   break;
        case 0x30: PM_INFO(". GET DOS VERSION (AH:%x)\n",reg_ah);
-                  break;                  
+                  break;
        case 0x2C: PM_INFO(". GET SYSTEM TIME (AH:%x)\n",reg_ah);
                   break;
        case 0x32: PM_INFO(". GET DOS DRIVE PARAMETER BLOCK FOR SPECIFIC DRIVE (AH:%x) DL:%X\n",reg_ah,reg_dl);
@@ -1465,15 +1607,15 @@ void PM_ExecCMD()
        case 0x3A: PM_INFO(". RMDIR - REMOVE SUBDIRECTORY (AH:%x)\n",reg_ah);
                   break;
        case 0x3B: PM_INFO(". CHDIR - SET CURRENT DIRECTORY (AH:%x)\n",reg_ah);
-                  break;                  
+                  break;
        case 0x3C: PM_INFO(". CREAT - CREATE OR TRUNCATE FILE (AH:%x)\n",reg_ah);
-                  break;     
+                  break;
        case 0x3D: PM_INFO(". OPEN - OPEN EXISTING FILE (AH:%x)\n",reg_ah);
                   break;
        case 0x3E: PM_INFO(". CLOSE - CLOSE FILE (AH:%x) Hannd:%X\n",reg_ah,(uint16_t) reg_bl);
                   break;
        case 0x3F: PM_INFO(". READ - READ FROM FILE OR DEVICE (AH:%x) Handle:%X\n",reg_ah,(uint16_t) reg_bl);
-                  break;                  
+                  break;
        case 0x40: PM_INFO(". WRITE - WRITE TO FILE OR DEVICE (AH:%x) Handle:%x\n",reg_ah,(uint16_t) reg_bl);
                   break;
        case 0x41: PM_INFO(". UNLINK - DELETE FILE (AH:%x) Handle:%xn",reg_ah,(uint16_t) reg_bl);
@@ -1485,17 +1627,17 @@ void PM_ExecCMD()
        case 0x47: PM_INFO(". CWD - GET CURRENT DIRECTORY (AH:%x)\n",reg_ah);
                   break;
        case 0x48: PM_INFO(". ALLOCATE MEMORY (AH:%x) Paragraph:%x\n",reg_ah,(uint16_t) reg_bl);
-                  break; 
+                  break;
        case 0x49: PM_INFO(". FREE MEMORY Segment:%x\n",reg_ah,(uint16_t) reg_esl);
                   break;
        case 0x4A: PM_INFO(". RESIZE MEMORY BLOCK (AH:%x)\n",reg_ah);
                   break;
        case 0x4B: PM_INFO(". EXEC - LOAD AND/OR EXECUTE PROGRAM %x\n",reg_ah);
-                  break; 
+                  break;
        case 0x4C: PM_INFO(". EXIT - TERMINATE WITH RETURN CODE (AH:%x) AL:%x\n",reg_ah,reg_al);
-                  break; 
+                  break;
        case 0x4D: PM_INFO(". GET RETURN CODE (ERRORLEVEL) (AH:%x)\n",reg_ah);
-                  break; 
+                  break;
        case 0x4E: PM_INFO(". FINDFIRST - FIND FIRST MATCHING FILE (AH:%x)\n",reg_ah);
                   break;
        case 0x4F: PM_INFO(". FINDNEXT - FIND NEXT MATCHING FILE (AH:%x)\n",reg_ah);
@@ -1527,9 +1669,9 @@ void PM_ExecCMD()
           case 0x16: PM_INFO(". NR - OPEN EXISTING REMOTE FILE (AH:%X)\n",reg_ah);
                      break;
           case 0x17: PM_INFO(". NR - CREATE OR TRUNCATE REMOTE FILE (AH:%X)\n",reg_ah);
-                     break; 
+                     break;
           case 0x18: PM_INFO(". NR - CREATE/TRUNCATE FILE WITHOUT CDS (AH:%X)\n",reg_ah);
-                     break;   
+                     break;
           case 0x19: PM_INFO(". NR - FIND FIRST FILE WITHOUT CDS (AH:%X)\n",reg_ah);
                       break;
           case 0x1A: PM_INFO(". NR - FIND NEXT FILE WITHOUT CDS (AH:%X)\n",reg_ah);
@@ -1540,7 +1682,7 @@ void PM_ExecCMD()
                      break;
           case 0x23: PM_INFO(". NR - QUALIFY REMOTE FILENAME (AH:%x)\n",reg_ah);
                      break;
-                                     
+
           default  : PM_INFO(". AH:%x AL:%X BX:%X, CX:%X, DX:%X\n",reg_ah, reg_al, (uint16_t) reg_bl, (uint16_t) reg_cl, (uint16_t) reg_dl);
                      break;
          }
@@ -1550,7 +1692,7 @@ void PM_ExecCMD()
      break;
 
     case CMD_DMA_TEST :
-#if  USE_HWDMA 
+#if  USE_HWDMA
 
      PM_INFO("DMA Test (HW DMA)\n");
 
@@ -1602,7 +1744,7 @@ void PM_ExecCMD()
        int8_t res;
        if (afifo_take_sample8(&sbdsp_fifo, &res)) PM_INFO("%d ",res);
          else PM_INFO("x ",res);
-      }      
+      }
 #endif
 
      PM_Status=STAT_READY;
@@ -1636,7 +1778,7 @@ void pm_display_claimed_pio_sm()
     if (pio_sm_is_claimed(pio1, 2)) PM_ERROR("pio/sm pio1/2 already claimed\n");
        else PM_INFO("PIO pio1 SM 2 free\n");
     if (pio_sm_is_claimed(pio1, 3)) PM_ERROR("pio/sm pio1/3 already claimed\n");
-        else PM_INFO("PIO pio1 SM 3 free\n");              
+        else PM_INFO("PIO pio1 SM 3 free\n");
 }
 
 #if defined(RASPBERRYPI_PICO2) || defined(PIMORONI_PICO_PLUS2_RP2350)
@@ -1657,7 +1799,7 @@ void measure_freqs(void) {
  #ifdef CLOCKS_FC0_SRC_VALUE_CLK_RTC
      uint f_clk_rtc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_RTC);
  #endif
- 
+
      PM_INFO("pll_sys  = %dkHz\n", f_pll_sys);
      PM_INFO("pll_usb  = %dkHz\n", f_pll_usb);
      PM_INFO("rosc     = %dkHz\n", f_rosc);
@@ -1668,7 +1810,7 @@ void measure_freqs(void) {
  #ifdef CLOCKS_FC0_SRC_VALUE_CLK_RTC
      PM_INFO("clk_rtc  = %dkHz\n", f_clk_rtc);
  #endif
- 
+
     // Can't measure clk_ref / xosc as it is the ref
 }
 
@@ -1701,7 +1843,7 @@ float psram_speed;
  uint32_t psram_begin = time_us_32();
  for (uint32_t addr = 0; addr < 4*(1024 * 1024); ++addr) {
      uint8_t result = test[addr];
-     if (static_cast<uint8_t>((addr & 0xFF)) != result) 
+     if (static_cast<uint8_t>((addr & 0xFF)) != result)
          {
           PM_INFO("PSRAM failure at address %x (%x != %x), 2nd read: %x\n", addr, addr & 0xFF, result, test[addr]);
          if (ErrNb++==10) break;
@@ -1709,9 +1851,9 @@ float psram_speed;
  }
  uint32_t psram_elapsed = time_us_32() - psram_begin;
  psram_speed = 1000000.0 * 4* 1024.0 * 1024 / psram_elapsed;
- PM_INFO("8 bit : PSRAM read 4MB in %d us, %d B/s\n", psram_elapsed, (uint32_t)psram_speed);
+ PM_INFO("8-bit : PSRAM read 4MB in %d us, %d B/s\n", psram_elapsed, (uint32_t)psram_speed);
 
- 
+
  PM_INFO("---- 16bit test (4MB):\n>Write Data (Low word of the adress)\n");
  for (uint32_t addr = 0; addr < 2*(1024 * 1024); ++addr) { // 2MB, 16Bit=4MB
      test16[addr]= (uint16_t) (addr & 0xFFFF);
@@ -1721,7 +1863,7 @@ float psram_speed;
  psram_begin = time_us_32();
  for (uint32_t addr = 0; addr < 2*(1024 * 1024); ++addr) {
      result16 = test16[addr];
-     if (static_cast<uint16_t>((addr & 0xFFFF)) != result16) 
+     if (static_cast<uint16_t>((addr & 0xFFFF)) != result16)
          {
          PM_INFO("PSRAM failure at address %x (%x != %x), 2nd read: %x\n", addr, addr & 0xFFFF, result16, (uint16_t) test[addr]);
          if (ErrNb++==20) break;
@@ -1729,7 +1871,7 @@ float psram_speed;
  }
  psram_elapsed = time_us_32() - psram_begin;
  psram_speed = 1000000.0 * 4* 1024.0 * 1024 / psram_elapsed;
- PM_INFO("16 bit : PSRAM read 1MB in %d us, %d B/s\n", psram_elapsed, (uint32_t)psram_speed);
+ PM_INFO("16-bit : PSRAM read 1MB in %d us, %d B/s\n", psram_elapsed, (uint32_t)psram_speed);
 
  /*
  PM_INFO("---- 32bit test (4MB):\n>Write Data (0xAAAAAAAA)\n");
@@ -1748,10 +1890,10 @@ float psram_speed;
          }
  PM_INFO("---- 32bit test End\n");
 
- PM_INFO("---- 32bit test (4MB):\n>Write Data (0x55555555)\n"); 
+ PM_INFO("---- 32bit test (4MB):\n>Write Data (0x55555555)\n");
   for (uint32_t addr = 0; addr < 4*(1024 * 1024); ++addr) { // 2MB, 16Bit=4MB
        test[addr]= 0x55;
-      } 
+      }
 
   PM_INFO(">Read Data\n");
  uint32_t psram_begin = time_us_32();
@@ -1764,10 +1906,10 @@ float psram_speed;
          }
  PM_INFO("---- 32bit test End\n");
 
- PM_INFO("---- 32bit test (4MB):\n>Write Data (0xFFFFFFFF)\n"); 
+ PM_INFO("---- 32bit test (4MB):\n>Write Data (0xFFFFFFFF)\n");
   for (uint32_t addr = 0; addr < 4*(1024 * 1024); ++addr) { // 2MB, 16Bit=4MB
        test[addr]= 0xFF;
-      } 
+      }
 
  PM_INFO(">Read Data\n");
  uint32_t psram_begin = time_us_32();
@@ -1780,10 +1922,10 @@ float psram_speed;
          }
  PM_INFO("---- 32bit test End\n");
 
- PM_INFO("---- 32bit test (4MB):\n>Write Data (0)\n"); 
+ PM_INFO("---- 32bit test (4MB):\n>Write Data (0)\n");
   for (uint32_t addr = 0; addr < 4*(1024 * 1024); ++addr) { // 2MB, 16Bit=4MB
        test[addr]= 0;
-      } 
+      }
 
  PM_INFO(">Read Data\n");
  uint32_t psram_begin = time_us_32();
@@ -1854,9 +1996,9 @@ for (;;)
 {
 //  gpio_put(43,1);  // Test scope pin
   busy_wait_us(10);
-//  gpio_put(46,0);  // Test scope pin  
+//  gpio_put(46,0);  // Test scope pin
   dev_joystick_ior(0x201,&d);
-}  
+}
 }
 
 //*******************************************************************************
@@ -1934,7 +2076,7 @@ PSRAM_Test();     // PSRAM test fail if started before SD init !!!
 // ************  Init the SDCARD and Read the config files ******************
 // !!! If uSD Init is done before the PSRAM, Wifi init fail....
 #if USE_SDCARD
-#if PM_PRINTF	
+#if PM_PRINTF
 pm_timefromlast();
 #endif
 PM_INFO(">Start uSD\n");
@@ -1946,6 +2088,9 @@ if (PM_StartSD())
    {
     if (pm_LoadConfig()==0) BV_CFGInit=0;  // Success
        else BV_CFGInit=0xFD;  // Failed
+#if PM_FWUPDATE
+    pm_fwupdate_check();      // AFTER the config is loaded, for the OLED type
+#endif
     BIOS_SetupDisks();        // Clean the Disk Objects
    } else BV_CFGInit=0xFF;    // Disabled (No Config to load)
 
@@ -1981,12 +2126,12 @@ PM_INFO(">Init RP2350 PSRAM:");
 setup_psram(false,0);    // Without heap
 #endif
 
-if (ps_size!=0) 
-  { 
+if (ps_size!=0)
+  {
     PM_INFO("%dKB\n",ps_size/1024);
     BV_PSRAMInit=8;
   }
-  else 
+  else
   {
     PM_INFO("Fail\n");
     BV_PSRAMInit=0xFD;  // Failed
@@ -2002,7 +2147,7 @@ pico_rtc_init();
 
 // ************  Qwiic Init and test code ******************
 
-#if PM_PRINTF	
+#if PM_PRINTF
 pm_timefromlast();
 #endif
 PM_INFO(">Start Qwiic\n");
@@ -2035,18 +2180,21 @@ if (pm_display_init(PM_OLED_Type)) ;  // I2C init is here
    dev_post_toinstall=true;
 #endif
     pm_input_init();  // Initialize as well the buttons for the display
+#if PM_FWUPDATE
+    if (pm_fwupdate_refused()) pm_display_fwupdate(PM_OLED_Type, "UPD Failed!");  // In place of the boot screen
+#endif
    }
 pm_i2c0_scan_print();
 
 #endif
 // **** Install POST device if enabled (Must be done after the I2C Init for the Qwiic) ****
 #if DEV_POST_Enable
-if (dev_post_toinstall) dev_post_install(); 
+if (dev_post_toinstall) dev_post_install();
 #endif
 
 // **************  USB Init  ******************
 
-#if PM_PRINTF	
+#if PM_PRINTF
 pm_timefromlast();
 #endif
 PM_INFO(">Start USB\n");
@@ -2054,16 +2202,16 @@ PM_INFO(">Start USB\n");
 #if USE_USBHOST
   if ((PM_Config->EnableUSB)==1)
    {
-    PM_StartUSB();   // Start USB and update BV_USBInit  
+    PM_StartUSB();   // Start USB and update BV_USBInit
    }
   else
    {
     BV_USBInit=INIT_DISABLED;   // Disabled
-    PM_INFO("USB Host Disabled in BIOS\r\n");    
-   } 
+    PM_INFO("USB Host Disabled in BIOS\r\n");
+   }
 #else
   BV_USBInit=INIT_DISABLED;   // Disabled
-  PM_INFO("USB Host Disabled in MakeFile\r\n");  
+  PM_INFO("USB Host Disabled in MakeFile\r\n");
 #endif
 
 // **************  Wifi Init  ******************
@@ -2078,16 +2226,21 @@ PM_EnableSD();
 uint8_t WifiRes=PM_ConnectWifi();
 //uint8_t WifiRes=1;
 
-if (WifiRes!=0) 
+if (WifiRes!=0)
    {
     BV_WifiInit=INIT_SKIPPED;  // 0xFC : Skipped/Error
     PM_Config->ne2000Port=0;
     PM_ERROR("\nWifi Init Err : %d\n",WifiRes);
    }
-   else BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+   else {
+    BV_WifiInit=INIT_DONE; // Wifi initialization Ok
+#if PM_HTTP
+    pm_httpd_init();
+#endif
+   }
 
 #endif //
-#endif // 
+#endif //
 
 // **************  EtherDFS init  ******************
 ethdfs_init();
@@ -2106,7 +2259,7 @@ ethdfs_test();
 #endif
 
 #if TEST_PSRAM  // ! PSRAM Test fail if not after SD Init !
-PSRAM_Test();  
+PSRAM_Test();
 #endif //TEST_PSRAM
 
 //dev_mpu_test();
@@ -2128,8 +2281,8 @@ wm_drain_fifo();
 #endif
 // PicoMEM Init Completed
 if (BV_PSRAMInit==INIT_INPROGRESS) BV_PSRAMInit=INIT_SKIPPED;  // Security : Init Skipped
-if (BV_SDInit==INIT_INPROGRESS) 
-   { 
+if (BV_SDInit==INIT_INPROGRESS)
+   {
     BV_SDInit=INIT_SKIPPED;        // Security : Init Skipped
    }
 
@@ -2205,11 +2358,19 @@ if (USB_Host_Enabled)
 #endif
 
 #if USE_SBDSP
-  dev_sbdsp_update();  
+  dev_sbdsp_update();
 #endif
 
 #if !BOARD_WM10
 if (dev_audiomix.enabled) pm_audio_domix();
+#endif
+
+#if PM_HTTP
+if (BV_WifiInit==INIT_DONE) pm_httpd_task();
+#endif
+
+#if SBDSP_IOLOG
+sbdsp_iolog_task();
 #endif
 
 absolute_time_t pm_delay_delta=absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay);
@@ -2232,7 +2393,7 @@ if (absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay) < 0)
 
 // Portion of the code executed every second for "Slow" reaction time needed code
    if (absolute_time_diff_us(get_absolute_time(), pm_cmd_1sdelay) < 0)
-     {  
+     {
       PM_INFO("*");  // Show that the system is alive (and not stuck in a loop for example)
 
       // 1s based actions done all the time
@@ -2241,7 +2402,7 @@ if (absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay) < 0)
 #endif
 
 #if CORE1_ALIVETEST
-      if ( Core1_AliveCnt==Core1_AliveCnt_Last) 
+      if ( Core1_AliveCnt==Core1_AliveCnt_Last)
          {
             PM_ERROR("Core1 Stuck ?\n");
          } else
@@ -2264,7 +2425,7 @@ if (absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay) < 0)
          }
         if (dev_mmb.delay++==4) {   // 4 seconds since last Mindscape I/O
           dev_mmb_disable_mix();  // Disable the mixing
-         } 
+         }
         if (dev_cvx.delay++==1) {   // 1 seconds since last Covox I/O or sound output
           dev_cvx_disable_mix();  // Disable the mixing
           cvx_stop_dac();         // STOP the Covox DAC
@@ -2272,16 +2433,16 @@ if (absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay) < 0)
 #if USE_MPU
          if (dev_mpu_delay++==8) {  // 10 seconds since last mpu Output
           dev_audiomix.dev_active = dev_audiomix.dev_active & ~AD_MPU;    //Disable the mixing
-         } 
-#endif                  
+         }
+#endif
         if (dev_sbdsp_delay++==8) {  // 4 second since last sbdsp I/O or sound output
           dev_sbdsp_disable_mix();  //Disable the Sound Blaster mixing
         }
-#if USE_GUS        
+#if USE_GUS
         if (dev_gus.delay++==10) {  // 4 second since last sbdsp I/O or sound output
           dev_gus_disable_mix();  //Disable the Sound Blaster mixing
-        }  
-#endif                
+        }
+#endif
       }
        else
       {  // 1s based actions when Audio is Off
@@ -2292,14 +2453,14 @@ if (absolute_time_diff_us(get_absolute_time(), pm_cmd_100msdelay) < 0)
                PM_Wifi_GetStatus();
                if (PM_Wifi.Status<=0)
                  {
-                   if (dev_audiomix.enabled) pm_audio_domix();  
+                   if (dev_audiomix.enabled) pm_audio_domix();
                    PM_RetryWifi();   // Retry to connect if connection error/Failed
-                 }                  
+                 }
                wifi_delay_counter=0;
               }
-            } 
+            }
 #endif
-      } 
+      }
 
       pm_cmd_1sdelay = make_timeout_time_us(1000000);    // Update the 1s delay value (1000000 is 1 second)
      }  // 1s delay end
@@ -2326,7 +2487,7 @@ if (multicore_fifo_rvalid())
 #endif
 #endif
    }
-  }             
+  }
 }
 
 }

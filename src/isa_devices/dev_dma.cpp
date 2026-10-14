@@ -142,6 +142,7 @@ SeeAlso: #P0004,#P0486
 */
 
 //#if USE_AUDIO
+#include "sbdsp/sbdsp_iolog.h"
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "../pm_debug.h"
@@ -235,6 +236,7 @@ void dev_dma_iow(uint32_t CTRL_AL8,uint8_t Data)
 // if (!dma_ignorechange)  // Ignore the change when the PicoMEM update the registers (in pm_pccmd.cpp)
 if (BV_DMANoUpdate==0) // if=0, update the DMA regs values
  {
+  IOLOG(IOLOG_DMA,addr,Data);
   switch(addr)
       {
       // Base address

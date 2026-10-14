@@ -1,3 +1,6 @@
 .vscode
 build
 *.LST
+
+# Local graft graph cache, rebuilt with `graft build`
+/graft/

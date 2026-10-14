@@ -1,0 +1,214 @@
+name: Firmware
+
+# Builds the PicoMEM 2.0 firmware variants and publishes them as a release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - '!src/drivers/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - '!src/drivers/**'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Versions declared at the top of src/CMakeLists.txt
+  PICOSDK_VER: '2.2.0'
+  PICOTOOL_VER: '2.2.0'
+  GCC_VER: '15.2.rel1'
+  # Toolchain, Pico SDK and host tools (picotool, pioasm), cached as a whole
+  PICO_ENV: ${{ github.workspace }}/.pico-env
+
+jobs:
+  # Fills the toolchain and SDK cache once for all the parallel builds
+  toolchain:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the toolchain and Pico SDK cache
+        id: cache-env
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PICO_ENV }}
+          key: pico-env-ubuntu-24.04-sdk${{ env.PICOSDK_VER }}-picotool${{ env.PICOTOOL_VER }}-gcc${{ env.GCC_VER }}-nousb
+          lookup-only: true
+
+      - name: Install the Arm GNU toolchain
+        if: steps.cache-env.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$PICO_ENV/gcc"
+          curl -fsSL "https://developer.arm.com/-/media/Files/downloads/gnu/$GCC_VER/binrel/arm-gnu-toolchain-$GCC_VER-x86_64-arm-none-eabi.tar.xz" \
+            | tar -xJ --strip-components=1 -C "$PICO_ENV/gcc"
+          rm -rf "$PICO_ENV/gcc/share/doc" "$PICO_ENV/gcc/share/info" "$PICO_ENV/gcc/share/man"
+          "$PICO_ENV/gcc/bin/arm-none-eabi-gcc" --version
+
+      - name: Clone the Pico SDK
+        if: steps.cache-env.outputs.cache-hit != 'true'
+        run: |
+          git clone -b "$PICOSDK_VER" --depth 1 https://github.com/raspberrypi/pico-sdk.git "$PICO_ENV/pico-sdk"
+          git -C "$PICO_ENV/pico-sdk" submodule update --init --depth 1
+
+      - name: Build picotool and pioasm
+        if: steps.cache-env.outputs.cache-hit != 'true'
+        run: |
+          git clone -b "$PICOTOOL_VER" --depth 1 https://github.com/raspberrypi/picotool.git "$RUNNER_TEMP/picotool"
+          cmake -S "$RUNNER_TEMP/picotool" -B "$RUNNER_TEMP/picotool-build" -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_ENV/pico-sdk" -DPICOTOOL_FLAT_INSTALL=1 -DPICOTOOL_NO_LIBUSB=1 -DCMAKE_INSTALL_PREFIX="$PICO_ENV/tools"
+          cmake --build "$RUNNER_TEMP/picotool-build" --target install --parallel "$(nproc)"
+          cmake -S "$PICO_ENV/pico-sdk/tools/pioasm" -B "$RUNNER_TEMP/pioasm-build" -DCMAKE_BUILD_TYPE=Release \
+            -DPIOASM_FLAT_INSTALL=1 -DPIOASM_VERSION_STRING="$PICOSDK_VER" -DCMAKE_INSTALL_PREFIX="$PICO_ENV/tools"
+          cmake --build "$RUNNER_TEMP/pioasm-build" --target install --parallel "$(nproc)"
+          ls "$PICO_ENV/tools/picotool" "$PICO_ENV/tools/pioasm"
+
+      - name: Save toolchain and Pico SDK
+        if: steps.cache-env.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PICO_ENV }}
+          key: pico-env-ubuntu-24.04-sdk${{ env.PICOSDK_VER }}-picotool${{ env.PICOTOOL_VER }}-gcc${{ env.GCC_VER }}-nousb
+
+  build:
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: gus-mpu,        gus: 1, mpu: 1, iolog: 0 }
+          - { variant: gus,            gus: 1, mpu: 0, iolog: 0 }
+          - { variant: mpu,            gus: 0, mpu: 1, iolog: 0 }
+          - { variant: nogus-nompu,    gus: 0, mpu: 0, iolog: 0 }
+          - { variant: debug-sbiolog,  gus: 1, mpu: 1, iolog: 1 }
+    env:
+      PICO_SDK_PATH: ${{ github.workspace }}/.pico-env/pico-sdk
+      PICO_TOOLCHAIN_PATH: ${{ github.workspace }}/.pico-env/gcc
+      BUILD_DIR: ${{ github.workspace }}/build
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - name: Checkout repo with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ninja-build ccache
+
+      - name: Restore toolchain and Pico SDK
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PICO_ENV }}
+          key: pico-env-ubuntu-24.04-sdk${{ env.PICOSDK_VER }}-picotool${{ env.PICOTOOL_VER }}-gcc${{ env.GCC_VER }}-nousb
+          fail-on-cache-miss: true
+
+      # One compiler cache per variant
+      - name: Restore compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache.${{ matrix.variant }}.${{ github.sha }}
+          restore-keys: ccache.${{ matrix.variant }}.   # The '.' keeps 'gus' from matching the 'gus-mpu' caches
+
+      - name: Configure
+        run: |
+          ccache --zero-stats
+          cmake -S src -B "$BUILD_DIR" -G Ninja \
+            -DPM_USE_GUS=${{ matrix.gus }} \
+            -DPM_USE_MPU=${{ matrix.mpu }} \
+            -DPM_SBDSP_IOLOG=${{ matrix.iolog }} \
+            -DPM_SAVE_TEMPS=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -Dpicotool_DIR="$PICO_ENV/tools/picotool" \
+            -Dpioasm_DIR="$PICO_ENV/tools/pioasm"
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+
+      - name: Compiler cache statistics
+        if: ${{ !cancelled() }}
+        run: ccache --show-stats
+
+      - name: Save compiler cache
+        if: ${{ !cancelled() && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache.${{ matrix.variant }}.${{ github.sha }}
+
+      - name: Collect firmware
+        run: |
+          mkdir -p "out/${{ matrix.variant }}"
+          cp "$BUILD_DIR/picomem.uf2" "out/${{ matrix.variant }}/picomem.uf2"
+          cp "$BUILD_DIR/partition.uf2" out/partition.uf2
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: picomem2-${{ matrix.variant }}
+          path: out/
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware
+        uses: actions/download-artifact@v4
+        with:
+          pattern: picomem2-*
+          path: fw
+          merge-multiple: true
+
+      - name: Version
+        id: version
+        run: |
+          now=$(date -u +%s)
+          echo "name=PMB-fw-$(date -u -d "@$now" +%Y-%m-%d)-$(printf '%05d' $((now % 86400)))" >> "$GITHUB_OUTPUT"
+
+      # One directory per variant with its picomem.uf2, and the partition.uf2 at the root
+      - name: Zip firmware
+        working-directory: fw
+        run: |
+          find . -type f | sort
+          zip -9 -r "../${{ steps.version.outputs.name }}.zip" .
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          cat > notes.md <<EOF
+          PicoMEM 2.0 firmware built from ${GITHUB_SHA}.
+
+          | Directory | GUS | MPU | SB I/O log |
+          |-----------|-----|-----|------------|
+          | gus-mpu/ | yes | yes | no |
+          | gus/ | yes | no | no |
+          | mpu/ | no | yes | no |
+          | nogus-nompu/ | no | no | no |
+          | debug-sbiolog/ | yes | yes | yes (sbiolog.txt on the SD card) |
+
+          Each directory contains the picomem.uf2 firmware of that variant.
+
+          The partition.uf2 is the partition table for the firmware update from the SD card or Wi-Fi. Flash it once, before the firmware (see the README).
+          EOF
+          gh release create "$NAME" "$NAME.zip" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$NAME" --notes-file notes.md
