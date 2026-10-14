@@ -65,6 +65,7 @@ bool afifo_add_sample8(audio_fifo_8_t *fifo, int8_t sample);
 bool afifo_add_samples8(audio_fifo_8_t *fifo, const int8_t *samples_buffer, uint32_t num_samples_to_add);
 uint32_t afifo_take_samples8(audio_fifo_8_t *fifo, uint32_t num_samples);
 bool  afifo_take_sample8(audio_fifo_8_t *fifo, int8_t *sample);
+void afifo_drop8(audio_fifo_8_t *fifo, uint32_t num_samples);
 
 void afifo_init8s(audio_fifo_8s_t *fifo);
 void afifo_reset8s(audio_fifo_8s_t *fifo);

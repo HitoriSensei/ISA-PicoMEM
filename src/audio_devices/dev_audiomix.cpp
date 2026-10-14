@@ -21,7 +21,7 @@
 #include "square/square.h"
 extern cms_t *cms;
 
-extern tandysound_t *tandysound;   // Tandy Emulation object    
+extern tandysound_t *tandysound;   // Tandy Emulation object
 
 extern void* tsfrenderer;
 
@@ -77,7 +77,7 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
        buffer = take_empty_buffer();
        if (buffer!=NULL)
        {
-         memset(buffer,0,PM_SAMPLES_PER_BUFFER*PM_SAMPLES_STRIDE);  // Clean the buffer in advanced 2*16bit*PM_SAMPLES_PER_BUFFER 
+         memset(buffer,0,PM_SAMPLES_PER_BUFFER*PM_SAMPLES_STRIDE);  // Clean the buffer in advanced 2*16bit*PM_SAMPLES_PER_BUFFER
 
 #if USE_MPU
          if (dev_audiomix.dev_active & AD_MPU) {
@@ -92,7 +92,7 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
             oplperf_end();
             }  // Adlib
 
-#if USE_SBDSP         
+#if USE_SBDSP
          if (dev_audiomix.dev_active & AD_SBDSP) {
              sbdsp_updatebuffer((int16_t*) buffer,PM_SAMPLES_PER_BUFFER);
             }  // Sound Blaster DSP
@@ -100,11 +100,11 @@ for (int i=0;i<4;i++)   // Try to mix 4 Buffers before giving some time for the 
 
          if (dev_audiomix.dev_active & AD_CMS) {
              cms->generator(0).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
-             cms->generator(1).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);              
+             cms->generator(1).generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
             }  // CMS
 
          if (dev_audiomix.dev_active & AD_TDY) {
-             tandysound->generator().generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);   
+             tandysound->generator().generate_frames((int16_t *) buffer, PM_SAMPLES_PER_BUFFER);
             }  //Tandy (mono)
 
          if (dev_audiomix.dev_active & AD_MMB) {
@@ -131,7 +131,7 @@ DBG_OFF_MIX();
 
 void dev_audiomix_start() {
 
-if (!dev_audiomix.enabled)   
+if (!dev_audiomix.enabled)
  {
 /*
 printf("Timer IRQ Priority : %x %x %x %x\n",irq_get_priority(TIMER_IRQ_0),irq_get_priority(TIMER_IRQ_1)
@@ -159,5 +159,5 @@ if (dev_audiomix.enabled)
 
 bool dev_audiomix_isactive()
 {
-   return dev_audiomix.enabled;   
+   return dev_audiomix.enabled;
 }

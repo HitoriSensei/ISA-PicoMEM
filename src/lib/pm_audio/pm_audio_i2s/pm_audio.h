@@ -4,8 +4,8 @@
 
 #include "../../../pm_debug.h"
 
-#define PM_AUDIO_FREQUENCY 49716   // Adlib output frequency
-//#define PM_AUDIO_FREQUENCY 44100
+// Output rate, equal to the OPL chip rate (14.31818MHz / 288). The sampled sources are resampled to it.
+#define PM_AUDIO_FREQUENCY 49716
 #define PM_SAMPLES_PER_BUFFER 64
 #define PM_AUDIO_BUFFERS  5
 #define PM_SAMPLES_STRIDE 4        // (Nb of byte per sample 16Bit X 2)

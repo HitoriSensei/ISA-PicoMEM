@@ -30,6 +30,7 @@ If not, see <https://www.gnu.org/licenses/>.
 #include "opl.h"
 #include "sbdsp/sbdsp.h"
 #include "dev_sbdsp.h"
+#include "sbdsp/sbdsp_iolog.h"
 
 extern bool sbdsp_write(uint8_t address, uint8_t value);
 extern uint8_t sbdsp_read(uint8_t address);
@@ -40,6 +41,7 @@ extern void sbdsp_dma_worker();
 bool dev_sbdsp_active=false;    // True if configured
 volatile uint8_t dev_sbdsp_delay=0;      // counter for the Nb of second since last I/O
 uint16_t dev_sbdsp_baseport;
+static uint8_t dev_sbdsp_type=SBT_2;     // Card emulated by the next install
 
 // Set the IRQ and DMA for the SB
 // IRQ can be 3,5,7
@@ -54,6 +56,23 @@ uint8_t dev_sbdsp_set_irq_dma(uint8_t irq,uint8_t dma)
       PM_ERROR("SBIRQ = PicoMEM IRQ (%d)\n",irq);
       return 1;
      } 
+ return 0;
+}
+
+// Sets the card type from the BLASTER T value. Returns 0 if ok.
+uint8_t dev_sbdsp_set_type(uint8_t blaster_type)
+{
+ uint8_t type;
+ switch (blaster_type)
+   {
+    case 3: type=SBT_2; break;
+    case 2:
+    case 4: type=SBT_PRO2; break;
+    default: return CMDERR_NOTSUPP;
+   }
+ PM_INFO("Set SB type T%d\n",blaster_type);
+ dev_sbdsp_type=type;
+ if (dev_sbdsp_active && (sbdsp.type!=type)) sbdsp_set_type(type);
  return 0;
 }
 
@@ -72,7 +91,6 @@ uint8_t dev_sbdsp_install(uint16_t baseport)
 
    SetPortType(baseport,DEV_SBDSP,2);
    
-   sbdsp.type=SBT_2;
    dev_sbdsp_active=true;
    dev_sbdsp_disable_mix();
   }
@@ -84,6 +102,7 @@ uint8_t dev_sbdsp_install(uint16_t baseport)
       SetPortType(baseport,DEV_SBDSP,2);
      } 
   dev_sbdsp_baseport=baseport;
+  sbdsp.type=dev_sbdsp_type;
   sbdsp_init();
   return 0;
 }
@@ -92,7 +111,9 @@ void dev_sbdsp_remove()
 {
  if (dev_sbdsp_active)       // Don't stop if not active
   {
+   dev_sbopl_remove();       // Its FM ports go with it
    dev_sbdsp_active=false;
+   sbdsp_set_type(SBT_NONE); // Puts the FM volume back to the maximum without the mixer
    dev_sbdsp_disable_mix();
    PM_INFO("Remove SB (%x)\n",dev_sbdsp_baseport);
    DelPortType(DEV_SBDSP);
@@ -114,12 +135,15 @@ void dev_sbdsp_update()
 
 bool dev_sbdsp_ior(uint32_t Port,uint8_t *Data )
 {
+  // Leaves the OPL status read to another FM card when the SB FM ports are disabled
+  if (((Port&0x0F)==8) && !dev_sbopl_active) return false;
   dev_sbdsp_enable_mix();
   dev_sbdsp_delay=0;
   if ((Port&0x0F)==8) // Adlib part of SB Status
    {
     *Data = (uint8_t) OPL_Pico_PortRead(OPL_REGISTER_PORT); 
   //  printf("OPLR %x-",*Data);
+    IOLOG(IOLOG_R,dev_sbdsp_baseport|(Port&0x0F),*Data);
     return true;
    } 
    else
@@ -127,6 +151,7 @@ bool dev_sbdsp_ior(uint32_t Port,uint8_t *Data )
     sbdsp_process();
     *Data=sbdsp_read((uint8_t) Port&0x0F);        
      sbdsp_process();
+     IOLOG(IOLOG_R,dev_sbdsp_baseport|(Port&0x0F),*Data);
  //    PM_INFO("SBR %x>%x",Port,Data);
      return true;
    }
@@ -136,14 +161,15 @@ void dev_sbdsp_iow(uint32_t Port,uint8_t Data)
 {
   //   PM_INFO("SBW %x>%x",Port,Data);
   static uint16_t sbopl_addr;
+  IOLOG(IOLOG_W,dev_sbdsp_baseport|(Port&0x0F),Data);
   sbdsp_process();
   dev_sbdsp_enable_mix();
   dev_sbdsp_delay=0;
   
   if (sbdsp_write((uint8_t) Port&0x0F, Data))
      sbdsp_process();  // Doesn't process if nothing written
-    else  // If not SB, May be adlib
-      switch (Port&0x0F) 
+    else if (dev_sbopl_active)  // If not SB, May be adlib
+      switch (Port&0x0F)
    {
    case 0x08:
      sbopl_addr = Data;

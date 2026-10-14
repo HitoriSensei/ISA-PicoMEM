@@ -24,6 +24,7 @@ __force_inline void dev_sbdsp_disable_mix() {
 
 extern uint8_t dev_sbdsp_install(uint16_t baseport);
 extern uint8_t dev_sbdsp_set_irq_dma(uint8_t irq,uint8_t dma);
+extern uint8_t dev_sbdsp_set_type(uint8_t blaster_type);
 extern void dev_sbdsp_remove();
 extern bool dev_sbdsp_installed();
 extern void dev_sbdsp_update();

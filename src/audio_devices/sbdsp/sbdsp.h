@@ -42,7 +42,8 @@ typedef struct sbdsp_t {
     bool autoinit;
     bool dma_enabled;
     bool dma_16bit;
-    bool dma_stereo;
+    bool dma_stereo;                 // SB Pro mixer stereo switch
+    volatile uint32_t stereo_origin; // FIFO byte count when the stereo started. Older bytes are dropped.
     bool dma_signed;
     uint8_t dma_rx_width;            // 1,2 or 4 bytes per transfer
     uint8_t dma_rx_index;            // Current DMA transfer width index
@@ -94,6 +95,7 @@ extern bool sbdsp_write(uint8_t address, uint8_t value);
 extern uint8_t sbdsp_read(uint8_t address);
 extern void sbdsp_process();
 extern void sbdsp_dma_worker();
+extern void sbdsp_set_type(uint8_t type);
 
 /*
 486, IRQ shrared: 26/07/25
